@@ -1,0 +1,3 @@
+*.asm text working-tree-encoding=IBM437
+*.inc text working-tree-encoding=IBM437
+*.mac text working-tree-encoding=IBM437
