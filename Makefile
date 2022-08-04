@@ -9,14 +9,14 @@
 #                                                             #
 #  Execute with GNU Make                                      #
 #                                                             #
-#  JWasm and OpenWatcom C/C++ toolsets required to build      #
+#  JWasm and JWLink toolsets required to build                #
 #  driver DLLs for all target environments                    #
 #                                                             #
 ###############################################################
 
 WCC386=wcc386
 ML=jwasm
-WLINK=jwlink
+WLINK=jwlink # Change this to `wlink` to use OpenWatcom's WLINK for linking instead
 
 ASMFLAGS=-q -c -W0 -Cp -Zd
 
