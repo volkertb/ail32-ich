@@ -167,7 +167,8 @@ a32pasdg.dll: dmasnd32.asm ail32.inc 386.mac
 # Digital sound driver: Intel ICHx AC'97 and compatibles
 #
 
-a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac ich_src/constant.inc ich_src/detect.asm ich_src/pci.asm
+a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac ich_src/constant.inc ich_src/detect.asm ich_src/pci.asm \
+			  ich_src/ich2ac97.inc
 	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ichdg.o a32ichdg.asm
 	$(WLINK) $(LFLAGS) n a32ichdg.dll f a32ichdg.o format os2 lx dll
 

@@ -1,3 +1,8 @@
+; SPDX-FileType: SOURCE
+; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
+; SPDX-FileContributor: Modified by Volkert de Buisonjé
+; SPDX-License-Identifier: CC0-1.0
+;
 ;constants of stuff that seem hard to remember at times.
 
 TRUE  EQU 1
