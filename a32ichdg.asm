@@ -110,6 +110,7 @@ driver_start    dd OFFSET driver_index
 
 driver_index    LABEL DWORD
                 dd AIL_DESC_DRVR,OFFSET describe_driver
+                dd AIL_DET_DEV,OFFSET detect_device
                 ; TODO : implement the rest of the AIL API
                 dd -1
 
@@ -138,6 +139,22 @@ devnames        LABEL BYTE
                 ;db "TODO: add line for each supported device/family here',0
                 db 0                    ;0 to end list of device names
 
+                ;
+                ;Misc. data
+                ;
+
+local_DS        dw ?
+
+spkr_status     dd ?
+
+;****************************************************************************
+;*                                                                          *
+;*  Internal procedures                                                     *
+;*                                                                          *
+;****************************************************************************
+
+; TODO
+
 ;****************************************************************************
 ;*                                                                          *
 ;*  Public (API-accessible) procedures                                      *
@@ -154,6 +171,32 @@ describe_driver PROC USES ebx esi edi
                 POP_F
                 ret
 describe_driver ENDP
+
+;****************************************************************************
+detect_device   PROC USES ebx esi edi,\
+                H,IO_ADDR,IRQ,DMA,DRQ
+                LOCAL old_S
+                LOCAL old_O
+                LOCAL old_real
+                LOCAL test_vect
+                LOCAL PIC0_cur:BYTE
+                LOCAL PIC1_cur:BYTE
+
+                pushfd                    ;Check for presence of hardware
+                cli
+
+                mov local_DS,ds
+
+                mov spkr_status,-1
+
+                ; FIXME: Insert/implement device-specific detection routine here. Return AX=1 if detected.
+                mov eax,1
+
+__exit:
+
+                POP_F                     ;return AX=0 if not found
+                ret
+detect_device   ENDP
 
 ;****************************************************************************
                 END
