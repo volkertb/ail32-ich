@@ -164,6 +164,14 @@ a32pasdg.dll: dmasnd32.asm ail32.inc 386.mac
 	$(WLINK) $(LFLAGS) n a32pasdg.dll f a32pasdg.o format os2 lx dll
 
 #
+# Digital sound driver: Intel ICHx AC'97 and compatibles
+#
+
+a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac
+	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ichdg.o a32ichdg.asm
+	$(WLINK) $(LFLAGS) n a32ichdg.dll f a32ichdg.o format os2 lx dll
+
+#
 # STP32.EXE: 32-bit protected-mode version of STPLAY
 #
 
