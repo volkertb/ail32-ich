@@ -1,3 +1,5 @@
 *.asm text working-tree-encoding=IBM437
 *.inc text working-tree-encoding=IBM437
 *.mac text working-tree-encoding=IBM437
+*.c text working-tree-encoding=IBM437
+*.h text working-tree-encoding=IBM437
