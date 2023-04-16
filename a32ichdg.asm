@@ -1,3 +1,7 @@
+; SPDX-FileType: SOURCE
+; SPDX-FileCopyrightText: Copyright (C) 1991-1993 Miles Design, Inc.
+; SPDX-FileCopyrightText: Copyright (C) 2023 Volkert de Buisonjé
+; SPDX-FileContributor: Volkert de Buisonjé
 ; SPDX-License-Identifier: Apache-2.0
 ;█████████████████████████████████████████████████████████████████████████████
 ;██                                                                         ██
@@ -12,17 +16,14 @@
 ;██                                                                         ██
 ;█████████████████████████████████████████████████████████████████████████████
 ;██                                                                         ██
-;██  Copyright (C) 2023 Volkert de Buisonjé                                 ██
 ;██  Copyright (C) 1991-1993 Miles Design, Inc.                             ██
+;██  Copyright (C) 2023 Volkert de Buisonjé                                 ██
 ;██                                                                         ██
 ;█████████████████████████████████████████████████████████████████████████████
 
                 OPTION SCOPED           ;Enable local labels
                 .386                    ;Enable 386 instruction set
  	            .MODEL FLAT,C           ;Flat memory model, C calls
-
-FALSE           equ 0
-TRUE            equ -1
 
                 ; Sound driver types, equates for drvr_desc.drvr_type values
 
@@ -137,6 +138,7 @@ display_size    dd 0                    ;No display
 devnames        LABEL BYTE
                 db "Intel ICHx AC'97 Digital Sound",0
                 ;db "TODO: add line for each supported device/family here',0
+                INCLUDE bld_info.inc
                 db 0                    ;0 to end list of device names
 
                 ;
@@ -153,7 +155,9 @@ spkr_status     dd ?
 ;*                                                                          *
 ;****************************************************************************
 
-; TODO
+                INCLUDE ich_src/detect.asm
+
+                ; TODO: add any other internal procedures here.
 
 ;****************************************************************************
 ;*                                                                          *
@@ -190,7 +194,8 @@ detect_device   PROC USES ebx esi edi,\
                 mov spkr_status,-1
 
                 ; FIXME: Insert/implement device-specific detection routine here. Return AX=1 if detected.
-                mov eax,1
+
+                call detect_ich_device
 
 __exit:
 
