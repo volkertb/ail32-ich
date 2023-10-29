@@ -143,7 +143,7 @@ devnames        LABEL BYTE
                 INCLUDE bld_info.inc
                 db 0                    ;0 to end list of device names
 
-extern whatever_ : proto ; C function to be invoked from assembly language, must be supplied to linker as object file
+extern whatever : proto ; C function to be invoked from assembly language, must be supplied to linker as object file
 
 ;****************************************************************************
 ;*                                                                          *
@@ -162,7 +162,7 @@ describe_driver PROC USES ebx esi edi
                 mov	eax, 0
 
                 ; Call printf
-                call whatever_ ;call printf wrt ..plt
+                call whatever ;call printf wrt ..plt
 
                 pop	ebp		; Pop stack
                 ; END CODE BLOCK FROM https://www.mourtada.se/calling-printf-from-the-c-standard-library-in-assembly/

@@ -203,9 +203,8 @@ a32dumdg.dll: a32dumdg.asm ail32.inc 386.mac bld_info.inc
 #
 
 testlib.o: testlib.c
-	# TODO : figure out why gcc object file results in "Non-32-bit offset fixup in table" error in dllload.c
-	#gcc -c -m32 -fno-pie -march=i386 testlib.c
-	source $${HOME}/opt/watcom/owsetenv.sh && wcc386 -mf -s testlib.c
+	source /usr/local/djgpp/setenv && gcc -c -m32 -fno-pie -march=i386 testlib.c
+	#source $${HOME}/opt/watcom/owsetenv.sh && wcc386 -mf -s testlib.c
 
 #
 # Digital "OSS bridge" sound driver
