@@ -32,7 +32,7 @@ clean:
 	rm -f *.o
 	rm -f *.dll
 	rm -f *.exe
-	rm bld_info.inc
+	rm -f bld_info.inc
 
 deploy:
 	mkdir -p out
@@ -187,7 +187,7 @@ a32pasdg.dll: dmasnd32.asm ail32.inc 386.mac
 a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac ich_src/constant.inc ich_src/detect.asm ich_src/pci.asm \
 			  ich_src/ich2ac97.inc bld_info.inc
 	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ichdg.o a32ichdg.asm
-	$(WLINK) $(LFLAGS) n a32ichdg.dll f a32ichdg.o format os2 lx dll
+	$(WLINK) $(LFLAGS) n $@ f a32ichdg.o format os2 lx dll
 
 #
 # Dummy Digital sound driver
@@ -195,7 +195,25 @@ a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac ich_src/constant.inc ich_src/detect
 
 a32dumdg.dll: a32dumdg.asm ail32.inc 386.mac bld_info.inc
 	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32dumdg.o a32dumdg.asm
-	$(WLINK) $(LFLAGS) n a32dumdg.dll f a32dumdg.o format os2 lx dll
+	$(WLINK) $(LFLAGS) n $@ f a32dumdg.o format os2 lx dll
+
+#
+# Simple test C "library", for figuring out how to invoke C code from the assembly code in the DLL source
+# NOTE: this is currently hard-coded with the assumption that Open Watcom v2 is installed in $HOME/opt/watcom
+#
+
+testlib.o: testlib.c
+	# TODO : figure out why gcc object file results in "Non-32-bit offset fixup in table" error in dllload.c
+	#gcc -c -m32 -fno-pie -march=i386 testlib.c
+	source $${HOME}/opt/watcom/owsetenv.sh && wcc386 -mf -s testlib.c
+
+#
+# Digital "OSS bridge" sound driver
+#
+
+a32ossdg.dll: a32ossdg.asm ail32.inc 386.mac bld_info.inc testlib.o
+	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ossdg.o a32ossdg.asm
+	$(WLINK) $(LFLAGS) n $@ f a32ossdg.o,testlib.o format os2 lx dll
 
 #
 # STP32.EXE: 32-bit protected-mode version of STPLAY
