@@ -1,7 +1,12 @@
 #!/bin/sh
 set -e
-echo "db \"Git commit: $(git rev-parse --short HEAD)\",0" > bld_info.inc
-echo "db \"Build time: $(date)\",0" >> bld_info.inc
 
-make a32ichdg.dll
-rm bld_info.inc
+make a32ichdg.dll a32dumdg.dll
+
+cp a32ichdg.dll test/
+cp a32dumdg.dll test/
+
+pushd test
+mformat -f 1440 -v AIL32ICHTST -C -i floppy.img ::
+mcopy -i floppy.img stp32.exe game_rdy.wav a32ichdg.dll a32dumdg.dll ::
+popd
