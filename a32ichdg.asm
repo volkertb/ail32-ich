@@ -23,7 +23,7 @@
 
                 OPTION SCOPED           ;Enable local labels
                 .386                    ;Enable 386 instruction set
- 	            .MODEL FLAT,C           ;Flat memory model, C calls
+                .MODEL FLAT,C           ;Flat memory model, C calls
 
                 ; Sound driver types, equates for drvr_desc.drvr_type values
 
