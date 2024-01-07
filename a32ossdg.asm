@@ -153,19 +153,16 @@ extern whatever : proto ; C function to be invoked from assembly language, must 
 
 describe_driver PROC USES ebx esi edi
 
-                ; BEGIN CODE BLOCK FROM https://www.mourtada.se/calling-printf-from-the-c-standard-library-in-assembly/
-                ; Create a stack-frame, re-aligning the stack to 16-byte alignment before calls
-                push ebp
+                ; See https://aaronbloomfield.github.io/pdr/book/x86-32bit-ccc-chapter.pdf
 
-                ;mov	edi, offset fmt
-                ;mov	esi, offset message
-                mov	eax, 0
+                ; Push call argument to stack
+                push 1234h
 
                 ; Call printf
                 call whatever ;call printf wrt ..plt
 
-                pop	ebp		; Pop stack
-                ; END CODE BLOCK FROM https://www.mourtada.se/calling-printf-from-the-c-standard-library-in-assembly/
+                ; "Discard" argument we put on stack
+                add esp,4
 
                 pushfd                  ;Return CS:near ptr to DDT
                 cli
