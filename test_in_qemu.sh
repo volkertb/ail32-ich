@@ -11,8 +11,7 @@
 VM_IMAGE_PATH=~/qemu-vm-images/c_freedos.qcow2
 VM_IMAGE_FORMAT=qcow2
 MOUNT_PATH=$(pwd)
-QEMU_COMMON_PARAMS="-machine pc,accel=kvm:hvf:whpx:xen:hax:nvmm:tcg -smp cpus=1,cores=1 -m 256M -rtc base=localtime
--no-hpet"
+QEMU_COMMON_PARAMS="-machine pc,accel=kvm:hvf:whpx:xen:hax:nvmm:tcg,hpet=off -smp cpus=1,cores=1 -m 256M -rtc base=localtime"
 
 set -e
 
