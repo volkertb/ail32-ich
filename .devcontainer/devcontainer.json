@@ -1,0 +1,15 @@
+{
+  "build": {
+    // Path is relative to the devcontainer.json file.
+    "dockerfile": "Dockerfile"
+  },
+  // Gets rid of the "user was not specified" error in JetBrains IDEs at the end of the Podman container image build
+  // Should be the same as the USER configured in the Dockerfile.
+  // If no explicit USER is specified in the Dockerfile (which is recommended), this value should be set to "root".
+  "containerUser": "dev-container-user",
+
+  // Needed for Podman to have proper file permissions for non-root container users, at least in JetBrains CLion
+  // (Visual Studio Code apparently handles this automatically)
+  // See also https://youtrack.jetbrains.com/projects/IJPL/issues/IJPL-67102/Devcontainer-clone-sources-option-mounted-as-root-user-inside-the-container
+  "runArgs": ["--userns=keep-id"]
+}
