@@ -114,6 +114,8 @@ driver_start    dd OFFSET driver_index
 
 driver_index    LABEL DWORD
                 dd AIL_DESC_DRVR,OFFSET describe_driver
+                dd AIL_DET_DEV,OFFSET detect_device
+                dd AIL_INIT_DRVR,OFFSET init_driver
                 ; TODO : implement the rest of the AIL API
                 dd -1
 
@@ -153,6 +155,43 @@ extern whatever : proto ; C function to be invoked from assembly language, must 
 
 describe_driver PROC USES ebx esi edi
 
+                pushfd                  ;Return CS:near ptr to DDT
+                cli
+
+                mov eax,OFFSET DDT
+
+                POP_F
+                ret
+describe_driver ENDP
+
+;****************************************************************************
+detect_device   PROC USES ebx esi edi
+
+                pushfd                    ;Check for presence of hardware
+                cli
+
+                ; FIXME: Insert/implement device-specific detection routine here. Return AX=1 if detected.
+
+                ; fake successful detection for now
+                mov ax,1
+
+__exit:
+
+                POP_F                     ;return AX=0 if not found
+                ret
+detect_device   ENDP
+
+;****************************************************************************
+init_driver     PROC USES ebx esi edi
+
+                pushfd
+                cli
+
+                ; Just print some text to screen in C code for now, to
+                ; verify C code integration. Implement actual driver
+                ; initialization later.
+                ; TODO: implement actual driver initalization code instead.
+
                 ; See https://aaronbloomfield.github.io/pdr/book/x86-32bit-ccc-chapter.pdf
 
                 ; Push call argument to stack
@@ -164,14 +203,9 @@ describe_driver PROC USES ebx esi edi
                 ; "Discard" argument we put on stack
                 add esp,4
 
-                pushfd                  ;Return CS:near ptr to DDT
-                cli
-
-                mov eax,OFFSET DDT
-
-                POP_F
+__exit_init:    POP_F
                 ret
-describe_driver ENDP
+init_driver     ENDP
 
 ;****************************************************************************
                 END

@@ -1,4 +1,4 @@
-// #include <stdio.h>
+#include "printf.h"
 // #include <pc.h>
 // #include <sys/nearptr.h>
 
@@ -16,8 +16,6 @@ int whatever(long arg);
 void write_string(int colour, const char *string, int starting_line);
 
 int whatever(long arg) {
-    //printf("Function whatever with underscore invoked!");
-
     // char a;
     // a = inportb(0x100);
 
@@ -35,12 +33,7 @@ int whatever(long arg) {
         write_string(10, "Hello, this is a test string :)", starting_line);
     }
 
-    // Test to check if parameter passing from assembly code is working.
-    if (arg == 0x1234) {
-        write_string(9, "Value 1234 was passed in call from assembly language! :D", starting_line + 1);
-    } else {
-        write_string(9, "Some value other than 1234 was passed in call from assembly language.", starting_line + 1);
-    }
+    printf("Function whatever invoked!\r\n");
 
     while (0) {
         // Infinite loop if enabled, for testing/debugging purposes

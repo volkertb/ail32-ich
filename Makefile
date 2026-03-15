@@ -9,19 +9,38 @@
 #                                                             #
 #  Execute with GNU Make                                      #
 #                                                             #
-#  JWasm and JWLink toolsets required to build                #
+#  JWasm and OpenWatcom C/C++ toolsets required to build      #
 #  driver DLLs for all target environments                    #
 #                                                             #
 ###############################################################
 
 WCC386=wcc386
 ML=jwasm
-WLINK=jwlink # Change this to `wlink` to use OpenWatcom's WLINK for linking instead
+WLINK=wlink  # When set to jwlink instead of wlink, applications like stp32.exe cannot be built (DLLs still can)
 
 ASMFLAGS=-q -c -W0 -Cp -Zd
 
-CFLAGS=-q
+# Watcom installations in Linux typically only include $(WATCOM)/lh in the INCLUDE environment variable.
+# But the DOS header files are in $(WATCOM)/h and those are needed for building stp32.exe and such.
+CFLAGS=-q -I$(WATCOM)/h
 LFLAGS=option quiet
+
+# Validates constraints imposed by the AIL/32 DLL loader (see dllload.c):
+#   - All fixups must be BIT32_OFFSET (type 0x07) -- other types cause "Invalid DLL image" (dllload.c:420)
+#   - No import fixups (flags 0x01/0x02/0x03) -- loader has no import resolution (dllload.c:432)
+#   - At most 9 objects -- loader has a fixed object_ptr[10] array, indexed 1-based (dllload.c:258)
+#   - At most 99 pages  -- loader has a fixed page_ptr[100] array, indexed 0-based (dllload.c:258)
+# Deletes the DLL and fails the build if any constraint is violated.
+# Usage: $(call VALIDATE_AIL32_DLL,$@)
+define VALIDATE_AIL32_DLL
+	@wdump -q -f $(1) | awk '\
+		/# of objects in module/ { if ($$NF > "00000009H") { print "ERROR: $(1) has more than 9 LX objects -- AIL/32 loader object_ptr[] overflow (dllload.c:258)" > "/dev/stderr"; exit 1 } }\
+		/# module pages/         { if ($$NF > "00000063H") { print "ERROR: $(1) has more than 99 LX pages -- AIL/32 loader page_ptr[] overflow (dllload.c:258)" > "/dev/stderr"; exit 1 } }\
+		/^ +[0-9a-fA-F][0-9a-fA-F] +[0-9a-fA-F][0-9a-fA-F] +src off/ {\
+			if ($$1 != "07") { print "ERROR: $(1) contains unsupported fixup type 0x" $$1 " -- AIL/32 loader only supports BIT32_OFFSET (0x07) (dllload.c:420)" > "/dev/stderr"; exit 1 }\
+			if ($$2 == "01" || $$2 == "02" || $$2 == "03") { print "ERROR: $(1) contains import fixup (flags=0x" $$2 ") -- AIL/32 loader does not support imports (dllload.c:432)" > "/dev/stderr"; exit 1 }\
+		}' || (rm -f $(1) && exit 1)
+endef
 
 all: a32mt32.dll a32mt32s.dll a32tandy.dll a32spkr.dll a32adlib.dll \
 a32algfm.dll a32sbfm.dll a32sp1fm.dll a32sp2fm.dll a32pasfm.dll \
@@ -202,17 +221,38 @@ a32dumdg.dll: a32dumdg.asm ail32.inc 386.mac bld_info.inc
 # NOTE: this is currently hard-coded with the assumption that Open Watcom v2 is installed in $HOME/opt/watcom
 #
 
-testlib.o: testlib.c
-	source /usr/local/djgpp/setenv && gcc -c -m32 -fno-pie -march=i386 testlib.c
-	#source $${HOME}/opt/watcom/owsetenv.sh && wcc386 -mf -s testlib.c
+testlib.o: testlib.c printf.h
+	# -ecc sets default calling convention to __cdecl, so symbols get exported with leading underscore, which the assembler expects with .MODEL FLAT,C.
+	# (Without -ecc, Open Watcom's register-based calling convention is used by default, which exports symbols with trailing underscores, which will lead to a mismatch during linking)
+	# -zc places const data (string literals, const globals) into the code segment instead of CONST/CONST2,
+	# keeping the DLL to a single LX object (required due to the AIL/32 loader bug at dllload.c:346).
+	wcc386 -mf -s -ecc -zc testlib.c
+
+#
+# mpaland/printf (https://github.com/mpaland/printf) - lightweight printf for embedded/bare-metal use.
+# Compiled with -ecc so that printf symbols use cdecl (leading underscore), consistent with the -ecc
+# convention used for all C code in this DLL that is callable from assembly.
+# putchar_dos.c provides the required _putchar() callback using DOS INT 21h.
+#
+
+printf.o: printf.c printf.h
+	wcc386 -mf -s -ecc -zc -za99 -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_EXPONENTIAL -DPRINTF_DISABLE_SUPPORT_LONG_LONG printf.c
+
+putchar_dos.o: putchar_dos.c
+	wcc386 -mf -s -ecc -zc putchar_dos.c
 
 #
 # Digital "OSS bridge" sound driver
 #
 
-a32ossdg.dll: a32ossdg.asm ail32.inc 386.mac bld_info.inc testlib.o
+a32ossdg.dll: a32ossdg.asm ail32.inc 386.mac bld_info.inc testlib.o printf.o putchar_dos.o
 	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ossdg.o a32ossdg.asm
-	$(WLINK) $(LFLAGS) n $@ f a32ossdg.o,testlib.o format os2 lx dll
+	# All C sources are compiled with -zc (place const data into the code segment), which prevents wcc386
+	# from emitting CONST/CONST2 segments. Without -zc, wlink creates a separate READABLE|WRITABLE LX
+	# object for those segments, breaking the AIL/32 DLL loader (dllload.c:346): it resets the page table
+	# offset to 0 for every LX object, so object 2+ pages are replaced by a second copy of object 1 data.
+	$(WLINK) $(LFLAGS) n $@ f a32ossdg.o,testlib.o,printf.o,putchar_dos.o format os2 lx dll
+	$(call VALIDATE_AIL32_DLL,$@)
 
 #
 # STP32.EXE: 32-bit protected-mode version of STPLAY
