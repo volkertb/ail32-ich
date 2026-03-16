@@ -34,3 +34,6 @@ Command to convert:
 ```shell
 ffmpeg -i input.wav -f u8 -acodec pcm_u8 -ar 22050 -ac 2 output.raw
 ```
+
+# Original sources published by John Miles:
+- http://www.ke5fx.com/ -> http://www.thegleam.com/ke5fx/misc/AIL2.ZIP

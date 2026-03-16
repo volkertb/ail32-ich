@@ -105,8 +105,76 @@ Apply `-zc` to **all** C sources that are linked into an AIL/32 DLL. Also ensure
 
 **What does NOT work:** The wlink `segment` directive (e.g. `segment CONST EXECUTERead`) does not solve this. Even with `EXECUTERead` set, wlink still creates a separate writable LX object for DGROUP-member segments. The `-zc` compiler flag is the correct solution.
 
+## AIL/32 Driver API Architecture
+
+Full API documentation is in `AIL_DOCS/API.TXT` (the AIL 3.14 manual, which AIL/32's `AIL_DOCS/READ.ME` defers to for API details). The C header `ail32.h` declares the public API consumed by games/applications.
+
+### Call flow: application → API → driver
+
+The application calls high-level C functions (e.g. `AIL_detect_device()`), which are implemented in `ail32.asm` (the Process Services module, linked as `ail32.o` into the application). These delegate to driver-specific routines via a function pointer table (`driver_index`) inside each driver DLL.
+
+The `driver_index` table maps numeric function IDs (defined in `ail32.inc`) to driver entry points:
+
+```
+AIL_DESC_DRVR   (100) → describe_driver  — return pointer to Driver Description Table (DDT)
+AIL_DET_DEV     (101) → detect_device    — probe for hardware, return nonzero if found
+AIL_INIT_DRVR   (102) → init_driver      — initialize hardware and internal state
+AIL_SHUTDOWN_DRVR (104) → shutdown_driver — shut down hardware, release resources
+```
+
+Additional function IDs exist for digital audio playback, XMIDI, etc. See `ail32.inc` for the full list and `dmasnd32.asm` for a complete reference implementation of a digital sound driver.
+
+### detect_device vs. init_driver — separation of concerns
+
+These two functions have **distinct responsibilities** that must not be conflated:
+
+**`detect_device`** (AIL_DET_DEV):
+- **Purpose:** Probe whether a supported device is present at the given I/O parameters. Returns nonzero if found, zero if not.
+- **Must not** initialize hardware or allocate resources.
+- **May** save detected state (e.g. PCI address) in driver-internal variables for `init_driver` to use later.
+- Called by the application to verify hardware presence before committing to initialization.
+
+**`init_driver`** (AIL_INIT_DRVR):
+- **Purpose:** Initialize the driver's internal data structures and prepare the sound adapter for use.
+- Called **only once**, and **only after** a successful `detect_device` call.
+- In the reference implementation (`dmasnd32.asm`), `init_driver` calls `detect_device` again internally as a safety check before proceeding with hardware setup (I/O port configuration, IRQ/DMA setup, PIC masks, interrupt vector hooking, etc.).
+
+### For the ICH driver specifically
+
+- **`detect_device`**: PCI bus scan → find a supported ICH/SiS AC'97 device → save the PCI bus/device/function address → return AX=1 if found.
+- **`init_driver`**: Read NAMBAR (mixer base) and NABMBAR (bus master base) from PCI BARs → enable I/O and bus master access via PCI command register → configure codec (sample rate, volume) → set up Buffer Descriptor List → prepare DMA engine.
+
+The hardware init code from `ich2player/player.asm` lines 212–228 (BAR reads + PCI command register) belongs in `init_driver`, not `detect_device`.
+
+### Reference source files
+
+- `dmasnd32.asm` — complete reference implementation of an AIL/32 digital sound driver (Sound Blaster, Pro Audio Spectrum, Ad Lib Gold variants via conditional assembly)
+- `ail32.inc` — function ID equates and shared macros
+- `ail32.h` — C API declarations for application developers
+- `AIL_DOCS/API.TXT` — full API documentation (covers both AIL 3.14 and AIL/32)
+- `AIL_DOCS/READ.ME` — AIL/32 release notes and addenda
+
+## ich2player Source Code (ich_src/)
+
+The `ich_src/` directory contains source files adapted from [ich2player](https://github.com/volkertb/ich2player) by Jeff Leyda, a standalone DOS program that plays WAV files through ICH AC'97 hardware. These provide the low-level hardware access routines for the ICH driver:
+
+| File | Purpose |
+|------|---------|
+| `constant.inc` | Bit constants, PCI equates |
+| `ich2ac97.inc` | ICH register definitions, BDL layout, status bits |
+| `codec.inc` | AC'97 codec/mixer register definitions |
+| `pci.asm` | PCI bus detection, register read/write, device scan |
+| `detect.asm` | Device detection routine (scans all supported ICH variants + SiS7012) |
+| `codec.asm` | Codec configuration: sample rate, volume, SiS7012 unmute quirk |
+| `utils.asm` | `delay1_4ms` timing routine (used by codec.asm) |
+| `ichwav.asm` | DMA playback engine: BDL setup, double-buffering, CIV/LVI management |
+
+**Important:** These files were written for 16-bit real mode (`.MODEL small, c, os_dos`) with segment:offset addressing. When integrating into the AIL/32 driver (32-bit flat model, `.MODEL FLAT,C`), segment-to-linear conversions (`shl eax, 4`) are not needed — use flat linear addresses directly. The PCI BIOS calls (`int 1Ah`) also need a real-mode callback mechanism under DOS/4GW protected mode.
+
 ## Current Work in Progress
 
-`a32ossdg.dll` is an experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
+**`a32ichdg.dll`** — Digital sound driver for Intel ICHx AC'97 and compatible devices. Currently has `detect_device` calling `detect_ich_device` (from `ich_src/detect.asm`), which performs the full PCI device scan. The `init_driver` routine and all playback functions are not yet implemented.
+
+**`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 
 `testlib.c` currently calls mpaland/printf three times and spins in an infinite loop — this is intentional for isolated testing in FreeDOS/QEMU. The printf output is confirmed working once the single-object constraint is satisfied via `-zc`.
