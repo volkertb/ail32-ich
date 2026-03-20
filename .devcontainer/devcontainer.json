@@ -11,5 +11,10 @@
   // Needed for Podman to have proper file permissions for non-root container users, at least in JetBrains CLion
   // (Visual Studio Code apparently handles this automatically)
   // See also https://youtrack.jetbrains.com/projects/IJPL/issues/IJPL-67102/Devcontainer-clone-sources-option-mounted-as-root-user-inside-the-container
-  "runArgs": ["--userns=keep-id"]
+  "runArgs": ["--userns=keep-id"],
+
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/.claude-home,target=/home/dev-container-user/.claude,type=bind",
+    "source=${localWorkspaceFolder}/.devcontainer/.claude.json,target=/home/dev-container-user/.claude.json,type=bind"
+  ]
 }

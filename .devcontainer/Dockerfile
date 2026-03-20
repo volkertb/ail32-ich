@@ -32,5 +32,5 @@ USER $USERNAME
 WORKDIR /home/$USERNAME
 
 # Uncomment the following if you want the Claude CLI tool in the terminal as soon the dev container starts up
-#ENV PATH="/home/$USERNAME/.local/bin:${PATH}"
-#RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="/home/$USERNAME/.local/bin:${PATH}"
+RUN curl -fsSL https://claude.ai/install.sh | bash
