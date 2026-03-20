@@ -1,6 +1,6 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonjé
+; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
 ; SPDX-License-Identifier: CC0-1.0
 ;
 ;constants of stuff that seem hard to remember at times.
@@ -81,6 +81,10 @@ PCI_INDEX_PORT  EQU     0CF8h
 PCI_DATA_PORT   EQU     0CFCh
 PCI32           EQU     BIT31           ; bitflag to signal 32bit access
 PCI16           EQU     BIT30           ; bitflag for 16bit access
+
+PCI_SLOT_STEP   EQU     100h            ; CONFIG_ADDRESS increment per slot (fn bits 10:8)
+PCI_SCAN_END    EQU     80FFF800h       ; first CONFIG_ADDRESS past last valid slot (bus 255, dev 31, fn 7)
+PCI_EMPTY_SLOT  EQU     0FFFFFFFFh      ; vendor:device ID returned for non-existent slots (PCI spec)
 
 PCI_FN0         EQU     (0 shl 8)
 PCI_FN1         EQU     (1 shl 8)

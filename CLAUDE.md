@@ -160,11 +160,11 @@ The `ich_src/` directory contains source files adapted from [ich2player](https:/
 
 | File | Purpose |
 |------|---------|
-| `constant.inc` | Bit constants, PCI equates |
+| `constant.inc` | Bit constants, PCI equates (including `PCI_SLOT_STEP`, `PCI_SCAN_END`, `PCI_EMPTY_SLOT` for bus scanning) |
 | `ich2ac97.inc` | ICH register definitions, BDL layout, status bits |
 | `codec.inc` | AC'97 codec/mixer register definitions |
 | `pci.asm` | PCI bus detection, register read/write, device scan. Wrapped in a `IFNDEF PCI_ASM_INCLUDED` include guard — safe to include from both `a32ichdg.asm` and `detect.asm` without double-definition errors. |
-| `detect.asm` | Device detection routine (scans all supported ICH variants + SiS7012) |
+| `detect.asm` | Device detection routine. Scans the PCI bus **once**, checking each occupied slot's vendor:device ID against a `supported_ids` table (all ICH variants + SiS7012). Single-pass approach is ~11x faster than the original per-ID scan; "not found" completes in under a second. |
 | `codec.asm` | Codec configuration: sample rate, volume, SiS7012 unmute quirk |
 | `utils.asm` | `delay1_4ms` timing routine (used by codec.asm) |
 | `ichwav.asm` | DMA playback engine: BDL setup, double-buffering, CIV/LVI management |

@@ -1,6 +1,6 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonjé
+; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
 ; SPDX-License-Identifier: CC0-1.0
 ;
 ;	PCI device register reader/writers.
@@ -203,11 +203,11 @@ pciFindDevice proc  near public
 	push	edi
 
         mov     esi, eax                ; save off vend+device ID
-        mov     edi, (80000000h - 100h) ; start with bus 0, dev 0 func 0
+        mov     edi, (BIT31 - PCI_SLOT_STEP) ; start before bus 0, dev 0, func 0
 
 nextPCIDevice:
-        add     edi, 100h
-        cmp     edi, 80fff800h		; scanned all devices?
+        add     edi, PCI_SLOT_STEP
+        cmp     edi, PCI_SCAN_END       ; scanned all devices?
         stc
         jz      PCIScanExit             ; not found
 
