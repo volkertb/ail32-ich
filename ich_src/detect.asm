@@ -1,6 +1,6 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
+; SPDX-FileContributor: Modified by Volkert de Buisonjé
 ; SPDX-License-Identifier: Apache-2.0
 ;
 ;	Device detection code.
@@ -44,7 +44,7 @@ pci_bios_detected:
         ;                    If anybody reading this comment happens to have an actual
         ;                    PC with any ICH AC'97 implementation and would be willing
         ;                    to test this software with it, that would be great! :)
-        ;                       - Volkert de Buisonj∩┐╜
+        ;                       - Volkert de Buisonjé
         ;
         ; Check for an ICH southbridge
         mov     eax, (ICH_DID shl 16) + INTEL_VID
