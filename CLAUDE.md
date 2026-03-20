@@ -163,17 +163,19 @@ The `ich_src/` directory contains source files adapted from [ich2player](https:/
 | `constant.inc` | Bit constants, PCI equates |
 | `ich2ac97.inc` | ICH register definitions, BDL layout, status bits |
 | `codec.inc` | AC'97 codec/mixer register definitions |
-| `pci.asm` | PCI bus detection, register read/write, device scan |
+| `pci.asm` | PCI bus detection, register read/write, device scan. Wrapped in a `IFNDEF PCI_ASM_INCLUDED` include guard — safe to include from both `a32ichdg.asm` and `detect.asm` without double-definition errors. |
 | `detect.asm` | Device detection routine (scans all supported ICH variants + SiS7012) |
 | `codec.asm` | Codec configuration: sample rate, volume, SiS7012 unmute quirk |
 | `utils.asm` | `delay1_4ms` timing routine (used by codec.asm) |
 | `ichwav.asm` | DMA playback engine: BDL setup, double-buffering, CIV/LVI management |
 
-**Important:** These files were written for 16-bit real mode (`.MODEL small, c, os_dos`) with segment:offset addressing. When integrating into the AIL/32 driver (32-bit flat model, `.MODEL FLAT,C`), segment-to-linear conversions (`shl eax, 4`) are not needed — use flat linear addresses directly. The PCI BIOS calls (`int 1Ah`) also need a real-mode callback mechanism under DOS/4GW protected mode.
+**Important:** These files were written for 16-bit real mode (`.MODEL small, c, os_dos`) with segment:offset addressing. When integrating into the AIL/32 driver (32-bit flat model, `.MODEL FLAT,C`), segment-to-linear conversions (`shl eax, 4`) are not needed — use flat linear addresses directly.
+
+**PCI access — no BIOS calls:** `pci.asm` uses direct I/O port access to `PCI_INDEX_PORT` (0CF8h) / `PCI_DATA_PORT` (0CFCh) throughout, which works fine from 32-bit protected mode under DOS/4GW. The original `pciBusDetect` used `int 1Ah` (PCI BIOS present check), but this has been replaced with a direct Config Mechanism #1 detection: write `BIT31` (80000000h) to 0CF8h and read it back — if the register retains the value, PCI is present. This avoids any real-mode BIOS call. Any system with ICH hardware is guaranteed to support PCI Config Mechanism #1.
 
 ## Current Work in Progress
 
-**`a32ichdg.dll`** — Digital sound driver for Intel ICHx AC'97 and compatible devices. Currently has `detect_device` calling `detect_ich_device` (from `ich_src/detect.asm`), which performs the full PCI device scan. The `init_driver` routine and all playback functions are not yet implemented.
+**`a32ichdg.dll`** — Digital sound driver for Intel ICHx AC'97 and compatible devices. `detect_device` is implemented: it calls `detect_ich_device` (from `ich_src/detect.asm`), which scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O and saves the found PCI bus/device/function address in `ich_pci_addr` for `init_driver` to use. The `init_driver` routine and all playback functions are not yet implemented.
 
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 

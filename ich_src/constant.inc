@@ -1,6 +1,6 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonjé
+; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
 ; SPDX-License-Identifier: CC0-1.0
 ;
 ;constants of stuff that seem hard to remember at times.
@@ -97,5 +97,3 @@ PCI_SUBSYS_REG	EQU 2Ch 	; reg 2C, subsystem reg
  MEM_ENA		EQU	BIT1		; memory decode enable
  BM_ENA			EQU BIT2		; bus master enable
 
-PCI_BIOS_INT     EQU 1Ah      ; PCI BIOS interface interrupt
-PCI_BIOS_PRESENT EQU 0B101h   ; PCI BIOS funcion to check for presence of PCI BIOS

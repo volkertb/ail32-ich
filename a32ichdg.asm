@@ -1,25 +1,25 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileCopyrightText: Copyright (C) 1991-1993 Miles Design, Inc.
-; SPDX-FileCopyrightText: Copyright (C) 2023 Volkert de Buisonjé
-; SPDX-FileContributor: Volkert de Buisonjé
+; SPDX-FileCopyrightText: Copyright (C) 2023 Volkert de Buisonj∩┐╜
+; SPDX-FileContributor: Volkert de Buisonj∩┐╜
 ; SPDX-License-Identifier: Apache-2.0
-;█████████████████████████████████████████████████████████████████████████████
-;██                                                                         ██
-;██  A32ICHDG.ASM                                                           ██
-;██                                                                         ██
-;██  Digital sound driver for Intel ICHx AC'97 & compatible devices         ██
-;██                                                                         ██
-;██  Version 0.0.1 of 16-Apr-23: First dummy/stub version (DLL loads)       ██
-;██                                                                         ██
-;██  80386 ASM source tested with JWASM, should work with MASM 6.0 or later ██
-;██  Author: Volkert de Buisonjé, based on AIL/32 code by John Miles        ██
-;██                                                                         ██
-;█████████████████████████████████████████████████████████████████████████████
-;██                                                                         ██
-;██  Copyright (C) 1991-1993 Miles Design, Inc.                             ██
-;██  Copyright (C) 2023 Volkert de Buisonjé                                 ██
-;██                                                                         ██
-;█████████████████████████████████████████████████████████████████████████████
+;∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜  A32ICHDG.ASM                                                           ∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜  Digital sound driver for Intel ICHx AC'97 & compatible devices         ∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜  Version 0.0.1 of 16-Apr-23: First dummy/stub version (DLL loads)       ∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜  80386 ASM source tested with JWASM, should work with MASM 6.0 or later ∩┐╜∩┐╜
+;∩┐╜∩┐╜  Author: Volkert de Buisonj∩┐╜, based on AIL/32 code by John Miles        ∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜  Copyright (C) 1991-1993 Miles Design, Inc.                             ∩┐╜∩┐╜
+;∩┐╜∩┐╜  Copyright (C) 2023 Volkert de Buisonj∩┐╜                                 ∩┐╜∩┐╜
+;∩┐╜∩┐╜                                                                         ∩┐╜∩┐╜
+;∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜∩┐╜
 
                 OPTION SCOPED           ;Enable local labels
                 .386                    ;Enable 386 instruction set
@@ -147,7 +147,8 @@ devnames        LABEL BYTE
 
 local_DS        dw ?
 
-spkr_status     dd ?
+ich_pci_addr    dd ?                    ;PCI bus/device/function address found by detect_device,
+                                        ;used by init_driver to read BARs and configure hardware
 
 ;****************************************************************************
 ;*                                                                          *
@@ -155,6 +156,7 @@ spkr_status     dd ?
 ;*                                                                          *
 ;****************************************************************************
 
+                INCLUDE ich_src/pci.asm
                 INCLUDE ich_src/detect.asm
 
                 ; TODO: add any other internal procedures here.
@@ -179,27 +181,16 @@ describe_driver ENDP
 ;****************************************************************************
 detect_device   PROC USES ebx esi edi,\
                 H,IO_ADDR,IRQ,DMA,DRQ
-                LOCAL old_S
-                LOCAL old_O
-                LOCAL old_real
-                LOCAL test_vect
-                LOCAL PIC0_cur:BYTE
-                LOCAL PIC1_cur:BYTE
 
-                pushfd                    ;Check for presence of hardware
+                pushfd                  ;Disable interrupts during device probe
                 cli
 
                 mov local_DS,ds
 
-                mov spkr_status,-1
+                call detect_ich_device  ;Returns EAX=1 if found, 0 if not
+                                        ;Also saves PCI address in ich_pci_addr
 
-                ; FIXME: Insert/implement device-specific detection routine here. Return AX=1 if detected.
-
-                call detect_ich_device
-
-__exit:
-
-                POP_F                     ;return AX=0 if not found
+                POP_F
                 ret
 detect_device   ENDP
 

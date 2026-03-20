@@ -1,26 +1,35 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonjé
+; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
 ; SPDX-License-Identifier: CC0-1.0
 ;
 ;	PCI device register reader/writers.
+
+IFNDEF PCI_ASM_INCLUDED
+PCI_ASM_INCLUDED EQU 1
 
 .386
 .CODE
 
         INCLUDE constant.inc
 
-; Copied from https://www.waste.org/~winkles/hardware/pci.htm
+; Detect PCI Configuration Mechanism #1 by writing the enable bit (BIT31)
+; to CONFIG_ADDRESS (PCI_INDEX_PORT) and reading it back. If the register
+; retains the value, Config Mechanism #1 is present. This works directly
+; from 32-bit protected mode without a real-mode BIOS call. Any system
+; with ICH hardware is guaranteed to support Config Mechanism #1.
 ; Entry: none
-; Exit: Zero Flag (ZF) set if PCI BIOS detected
+; Exit: Zero Flag (ZF) set if PCI bus detected
 pciBusDetect proc public
-        push ax
-        push edx
-        mov     ax, PCI_BIOS_PRESENT ; interrupt 1a function b101
-        int     PCI_BIOS_INT         ; will tell us if there is a PCI
-        cmp     edx," ICP"           ; bus on the board.
-        pop edx
-        pop ax
+        push    eax
+        push    edx
+        mov     dx, PCI_INDEX_PORT
+        mov     eax, BIT31              ; 80000000h ΓÇö CONFIG_ADDRESS enable bit
+        out     dx, eax
+        in      eax, dx
+        cmp     eax, BIT31              ; ZF set if PCI Config Mechanism #1 present
+        pop     edx
+        pop     eax
         ret
 pciBusDetect endp
 
@@ -220,3 +229,5 @@ PCIScanExit:
 	pop	cx
 	ret
 pciFindDevice endp
+
+ENDIF ; PCI_ASM_INCLUDED

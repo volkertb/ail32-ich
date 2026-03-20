@@ -1,6 +1,6 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonjé
+; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
 ; SPDX-License-Identifier: Apache-2.0
 ;
 ;	Device detection code.
@@ -44,7 +44,7 @@ pci_bios_detected:
         ;                    If anybody reading this comment happens to have an actual
         ;                    PC with any ICH AC'97 implementation and would be willing
         ;                    to test this software with it, that would be great! :)
-        ;                       - Volkert de Buisonjé
+        ;                       - Volkert de Buisonj∩┐╜
         ;
         ; Check for an ICH southbridge
         mov     eax, (ICH_DID shl 16) + INTEL_VID
@@ -107,7 +107,8 @@ supported_device_not_detected:
         ret
 
 supported_device_detected:
-        mov eax,1 ; not zero = detected
+        mov ich_pci_addr,eax    ; save PCI bus/device/function for use by init_driver
+        mov eax,1               ; return nonzero = detected
         ret
 
 detect_ich_device endp
