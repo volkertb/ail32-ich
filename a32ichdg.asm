@@ -112,6 +112,7 @@ driver_start    dd OFFSET driver_index
 driver_index    LABEL DWORD
                 dd AIL_DESC_DRVR,OFFSET describe_driver
                 dd AIL_DET_DEV,OFFSET detect_device
+                dd AIL_INIT_DRVR,OFFSET init_driver
                 ; TODO : implement the rest of the AIL API
                 dd -1
 
@@ -150,6 +151,10 @@ local_DS        dw ?
 ich_pci_addr    dd ?                    ;PCI bus/device/function address found by detect_device,
                                         ;used by init_driver to read BARs and configure hardware
 
+NAMBAR          dw ?                    ;Native Audio Mixer base I/O address (PCI BAR 0)
+NABMBAR         dw ?                    ;Native Audio Bus Master base I/O address (PCI BAR 1)
+DETECTED_PCI_DEV dd ?                   ;Vendor:device ID of detected PCI device (for SiS7012 quirk)
+
 ;****************************************************************************
 ;*                                                                          *
 ;*  Internal procedures                                                     *
@@ -158,6 +163,8 @@ ich_pci_addr    dd ?                    ;PCI bus/device/function address found b
 
                 INCLUDE ich_src/pci.asm
                 INCLUDE ich_src/detect.asm
+                INCLUDE ich_src/utils.asm
+                INCLUDE ich_src/codec.asm
 
                 ; TODO: add any other internal procedures here.
 
@@ -193,6 +200,113 @@ detect_device   PROC USES ebx esi edi,\
                 POP_F
                 ret
 detect_device   ENDP
+
+;****************************************************************************
+init_driver     PROC USES ebx esi edi,\
+                H,IO_ADDR,IRQ,DMA,DRQ
+
+                pushfd
+                cli
+
+                mov local_DS,ds
+
+                ;
+                ;Read device+vendor ID for SiS7012 quirk detection in codecConfig
+                ;
+
+                mov     eax, ich_pci_addr       ;bus/dev/fn, register 0
+                call    pciRegRead32            ;edx = vendor:device ID dword
+                mov     DETECTED_PCI_DEV, edx
+
+                ;
+                ;Read NAMBAR (Native Audio Mixer base, PCI BAR 0 at reg 10h)
+                ;
+
+                mov     eax, ich_pci_addr
+                or      eax, NAMBAR_REG         ;PCI config register 10h
+                call    pciRegRead32
+                and     dx, IO_ADDR_MASK        ;strip I/O BAR type bit
+                mov     NAMBAR, dx
+
+                ;
+                ;Read NABMBAR (Native Audio Bus Master base, PCI BAR 1 at reg 14h)
+                ;
+
+                mov     eax, ich_pci_addr
+                or      eax, NABMBAR_REG        ;PCI config register 14h
+                call    pciRegRead32
+                and     dx, IO_ADDR_MASK
+                mov     NABMBAR, dx
+
+                ;
+                ;Enable I/O decode and bus master in PCI command register
+                ;
+
+                mov     eax, ich_pci_addr
+                or      eax, PCI_CMD_REG        ;PCI config register 04h
+                call    pciRegRead16            ;dx = current command register
+                or      dx, IO_ENA or BM_ENA    ;enable I/O space + bus master
+                call    pciRegWrite16           ;eax still has the address
+
+                ;
+                ;Cold-reset the AC'97 link
+                ;
+
+                mov     dx, NABMBAR
+                add     dx, GLOB_CNT_REG        ;NABMBAR + 2Ch
+                in      eax, dx
+                and     eax, NOT ACLINK_OFF     ;ensure AC link is not forced off
+                or      eax, ACCOLD_RESET       ;assert cold reset
+                out     dx, eax
+
+                ;
+                ;Wait for primary codec ready
+                ;
+
+                mov     dx, NABMBAR
+                add     dx, GLOB_STS_REG        ;NABMBAR + 30h
+@@:             in      eax, dx
+                test    eax, PRI_CODEC_RDY
+                jz      @b
+
+                ;
+                ;Deassert cold reset
+                ;
+
+                mov     dx, NABMBAR
+                add     dx, GLOB_CNT_REG
+                in      eax, dx
+                and     eax, NOT ACCOLD_RESET
+                out     dx, eax
+
+                ;
+                ;Enable Variable Rate Audio (VRA) in the codec
+                ;Without VRA, the codec ignores sample rate writes and runs at 48 kHz.
+                ;
+
+                mov     dx, NAMBAR
+                add     dx, CODEC_EXT_AUDIO_CTRL_REG ;NAMBAR + 2Ah
+                in      ax, dx
+                or      ax, BIT0                ;VRA enable
+                out     dx, ax
+                call    delay1_4ms
+                call    delay1_4ms
+                call    delay1_4ms
+                call    delay1_4ms
+
+                ;
+                ;Configure codec: 44.1 kHz sample rate, set volume to maximum
+                ;
+
+                mov     ax, SAMPLE_RATE_441khz
+                mov     bh, 'Y'                 ;set volume
+                call    codecConfig
+
+                POP_F
+                mov     eax, 1                  ;return nonzero = success
+                ret
+
+init_driver     ENDP
 
 ;****************************************************************************
                 END

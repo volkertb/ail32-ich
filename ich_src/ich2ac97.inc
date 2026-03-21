@@ -60,7 +60,7 @@ PI_BDBAR_REG            equ     0       ; PCM in buffer descriptor BAR
 PO_BDBAR_REG            equ     10h     ; PCM out buffer descriptor BAR
 MC_BDBAR_REG            equ     20h     ; MIC in buffer descriptor BAR
 
-CUSTOM_SIS_7012_REG             equ     0x4c    ; SiS7012-specific register, required for unmuting output
+CUSTOM_SIS_7012_REG             equ     4Ch     ; SiS7012-specific register, required for unmuting output
 
 ; each buffer descriptor BAR holds a pointer which has entries to the buffer
 ; contents of the .WAV file we're going to play.  Each entry is 8 bytes long

@@ -5,11 +5,8 @@
 ; Non-platform-specific utility routines.
 ;
 
-        .DOSSEG
-        .MODEL  small, c, os_dos
-
-.386
-.CODE
+IFNDEF ICH_UTILS_ASM_INCLUDED
+ICH_UTILS_ASM_INCLUDED EQU 1
 
         INCLUDE constant.inc
 
@@ -58,4 +55,5 @@ delay1_4ms PROC public
         pop     ax
         ret
 delay1_4ms     ENDP
-End
+
+ENDIF ; ICH_UTILS_ASM_INCLUDED

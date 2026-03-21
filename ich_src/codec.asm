@@ -16,18 +16,8 @@
 ; using fixed delays, but the original author found this approach sufficient.)
 ;
 
-        .DOSSEG
-        .MODEL  small, c, os_dos
-
-.386
-
-
-        .CODE
-
-        extern  NAMBAR:word             ; mixer base address (from PCI BAR 0)
-        extern  NABMBAR:WORD            ; bus master base address (from PCI BAR 1)
-        extern  DETECTED_PCI_DEV:DWORD  ; detected device+vendor ID from PCI scan
-        extern  delay1_4ms:NEAR         ; ~250 us delay routine (utils.asm)
+IFNDEF ICH_CODEC_ASM_INCLUDED
+ICH_CODEC_ASM_INCLUDED EQU 1
 
         include codec.inc
         include ich2ac97.inc
@@ -143,4 +133,4 @@ unmuteSis7012 proc public
 unmuteSis7012 endp
 
 
-end
+ENDIF ; ICH_CODEC_ASM_INCLUDED

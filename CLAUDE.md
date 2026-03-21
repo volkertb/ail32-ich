@@ -163,19 +163,21 @@ The `ich_src/` directory contains source files adapted from [ich2player](https:/
 | `constant.inc` | Bit constants, PCI equates (including `PCI_SLOT_STEP`, `PCI_SCAN_END`, `PCI_EMPTY_SLOT` for bus scanning) |
 | `ich2ac97.inc` | ICH register definitions, BDL layout, status bits |
 | `codec.inc` | AC'97 codec/mixer register definitions |
-| `pci.asm` | PCI bus detection, register read/write, device scan. Wrapped in a `IFNDEF PCI_ASM_INCLUDED` include guard — safe to include from both `a32ichdg.asm` and `detect.asm` without double-definition errors. |
+| `pci.asm` | Generic PCI bus detection, register read/write. Include-guarded (`PCI_ASM_INCLUDED` — no `ICH_` prefix since this code is not ICH-specific). |
 | `detect.asm` | Device detection routine. Scans the PCI bus **once**, checking each occupied slot's vendor:device ID against a `supported_ids` table (all ICH variants + SiS7012). Single-pass approach is ~11x faster than the original per-ID scan; "not found" completes in under a second. |
-| `codec.asm` | Codec configuration: sample rate, volume, SiS7012 unmute quirk |
-| `utils.asm` | `delay1_4ms` timing routine (used by codec.asm) |
+| `codec.asm` | Codec configuration: sample rate, volume, SiS7012 unmute quirk. Include-guarded (`ICH_CODEC_ASM_INCLUDED`). |
+| `utils.asm` | `delay1_4ms` timing routine (used by codec.asm). Include-guarded (`ICH_UTILS_ASM_INCLUDED`). |
 | `ichwav.asm` | DMA playback engine: BDL setup, double-buffering, CIV/LVI management |
 
-**Important:** These files were written for 16-bit real mode (`.MODEL small, c, os_dos`) with segment:offset addressing. When integrating into the AIL/32 driver (32-bit flat model, `.MODEL FLAT,C`), segment-to-linear conversions (`shl eax, 4`) are not needed — use flat linear addresses directly.
+**Important:** These files were originally written for 16-bit real mode (`.MODEL small, c, os_dos`) with segment:offset addressing. Files that have been integrated into the AIL/32 driver (`pci.asm`, `detect.asm`, `utils.asm`, `codec.asm`) have had their `.MODEL`/`.DOSSEG`/`.CODE` directives and `extern` declarations stripped, replaced by `IFNDEF` include guards. When included into `a32ichdg.asm`, they inherit its `.MODEL FLAT,C` context and access shared variables (`NAMBAR`, `NABMBAR`, `DETECTED_PCI_DEV`, `ich_pci_addr`) defined there. Guard names use an `ICH_` prefix for generic names (e.g. `ICH_CODEC_ASM_INCLUDED`) to avoid collisions.
+
+**16-bit to 32-bit porting note:** Segment-to-linear conversions (`shl eax, 4`) are not needed in flat model — use linear addresses directly. Files not yet integrated (`ichwav.asm`) still use the original 16-bit model.
 
 **PCI access — no BIOS calls:** `pci.asm` uses direct I/O port access to `PCI_INDEX_PORT` (0CF8h) / `PCI_DATA_PORT` (0CFCh) throughout, which works fine from 32-bit protected mode under DOS/4GW. The original `pciBusDetect` used `int 1Ah` (PCI BIOS present check), but this has been replaced with a direct Config Mechanism #1 detection: write `BIT31` (80000000h) to 0CF8h and read it back — if the register retains the value, PCI is present. This avoids any real-mode BIOS call. Any system with ICH hardware is guaranteed to support PCI Config Mechanism #1.
 
 ## Current Work in Progress
 
-**`a32ichdg.dll`** — Digital sound driver for Intel ICHx AC'97 and compatible devices. `detect_device` is implemented: it calls `detect_ich_device` (from `ich_src/detect.asm`), which scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O and saves the found PCI bus/device/function address in `ich_pci_addr` for `init_driver` to use. The `init_driver` routine and all playback functions are not yet implemented.
+**`a32ichdg.dll`** — Digital sound driver for Intel ICHx AC'97 and compatible devices. `detect_device` and `init_driver` are implemented. Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O and saves the found PCI bus/device/function address in `ich_pci_addr`. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, and configures the codec at 44.1 kHz with max volume via `codecConfig`. Playback functions (`AIL_START_DIG_PLAY`, etc.) and `shutdown_driver` are not yet implemented.
 
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 
