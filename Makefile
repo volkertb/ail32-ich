@@ -204,9 +204,11 @@ a32pasdg.dll: dmasnd32.asm ail32.inc 386.mac
 #
 
 a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac ich_src/constant.inc ich_src/detect.asm ich_src/pci.asm \
-			  ich_src/ich2ac97.inc bld_info.inc
+			  ich_src/ich2ac97.inc ich_src/codec.asm ich_src/codec.inc ich_src/utils.asm \
+			  util/dpmi.asm util/to16s.asm util/dbgser.asm bld_info.inc
 	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ichdg.o a32ichdg.asm
 	$(WLINK) $(LFLAGS) n $@ f a32ichdg.o format os2 lx dll
+	$(call VALIDATE_AIL32_DLL,$@)
 
 #
 # Dummy Digital sound driver
@@ -259,7 +261,10 @@ a32ossdg.dll: a32ossdg.asm ail32.inc 386.mac bld_info.inc testlib.o printf.o put
 #
 
 stp32.exe: stp32.c ail32.h dll.h ail32.o dllload.o dos4gw.exe
-	$(WCC386) $(CFLAGS) -dDPMI stp32
+	# -zp2: match Watcom C/386 v9.0 default struct packing (word-aligned).
+	# Open Watcom defaults to -zp8, which pads sound_buff after the 6-byte
+	# far pointer, misaligning seg_data and len vs the driver's ASM struct.
+	$(WCC386) $(CFLAGS) -zp2 -dDPMI stp32
 	$(WLINK) $(LFLAGS) n stp32 f stp32,ail32,dllload system dos4g
 
 #

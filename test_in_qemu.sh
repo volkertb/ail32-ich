@@ -14,6 +14,8 @@ MOUNT_PATH=$(pwd)
 ETHERDFS_TAP_IF_0=etherdfs0
 ETHERDFS_TAP_IF_1=etherdfs1
 ETHERDFS_BRIDGE=br-etherdfs
+VM_0_SERIAL_FIFO_PREFIX=dos_vm_qemu_fifo_0
+VM_1_SERIAL_FIFO_PREFIX=dos_vm_qemu_fifo_1
 
 set -e
 
@@ -39,10 +41,14 @@ cleanup() {
   sudo ip link del ${ETHERDFS_BRIDGE} || true
   sudo ip tuntap del ${ETHERDFS_TAP_IF_0} mode tap || true
   sudo ip tuntap del ${ETHERDFS_TAP_IF_1} mode tap || true
+  rm -f /run/user/$UID/${VM_0_SERIAL_FIFO_PREFIX}.in
+  rm -f /run/user/$UID/${VM_0_SERIAL_FIFO_PREFIX}.out
+  rm -f /run/user/$UID/${VM_1_SERIAL_FIFO_PREFIX}.in
+  rm -f /run/user/$UID/${VM_1_SERIAL_FIFO_PREFIX}.out
 }
 trap cleanup EXIT
 
-# Set up a tap device so we can share the volume with the DOS VM through EtherDFS (faster and simpler than Samba!)
+# Set up tap devices so we can share the volume with the DOS VMs through EtherDFS (faster and simpler than Samba!)
 # NOTE: this is Linux-specific. macOS would need a different way to do this.
 sudo killall -15 ethersrv-linux || true
 # Clean up existing stuff first, to make script idempotent
@@ -71,6 +77,16 @@ echo "Serving on MAC address $(ip link show "${ETHERDFS_BRIDGE}")"
 
 command -v "$qemu_exec" > /dev/null || (echo "$qemu_exec not found, make sure you have QEMU installed." && exit 1)
 
+# Set up FIFO pipes for serial I/O with the DOS VMs, useful for debugging
+#rm -f /run/user/$UID/${VM_0_SERIAL_FIFO_PREFIX}.in
+#rm -f /run/user/$UID/${VM_0_SERIAL_FIFO_PREFIX}.out
+#rm -f /run/user/$UID/${VM_1_SERIAL_FIFO_PREFIX}.in
+#rm -f /run/user/$UID/${VM_1_SERIAL_FIFO_PREFIX}.out
+#mkfifo /run/user/$UID/${VM_0_SERIAL_FIFO_PREFIX}.in \
+#       /run/user/$UID/${VM_0_SERIAL_FIFO_PREFIX}.out \
+#       /run/user/$UID/${VM_1_SERIAL_FIFO_PREFIX}.in \
+#       /run/user/$UID/${VM_1_SERIAL_FIFO_PREFIX}.out
+
 # One QEMU instance with read-only C: and with an audio device:
 # shellcheck disable=SC2086
 $qemu_exec \
@@ -81,6 +97,7 @@ $qemu_exec \
       -netdev tap,id=net0,ifname=${ETHERDFS_TAP_IF_0},script=no,downscript=no \
       -device pcnet,netdev=net0 \
       -drive "${aio_override_prefix}"if=virtio,format=${VM_IMAGE_FORMAT},file="${VM_IMAGE_PATH}",read-only=on \
+      -serial vc \
       -audiodev pipewire,id=audio0 \
       -device AC97,audiodev=audio0 &
 
@@ -93,7 +110,8 @@ $qemu_exec \
       -rtc base=localtime \
       -netdev tap,id=net0,ifname=${ETHERDFS_TAP_IF_1},script=no,downscript=no \
       -device pcnet,netdev=net0 \
-      -drive "${aio_override_prefix}"if=virtio,format=${VM_IMAGE_FORMAT},file="${VM_IMAGE_PATH}",read-only=on &
+      -drive "${aio_override_prefix}"if=virtio,format=${VM_IMAGE_FORMAT},file="${VM_IMAGE_PATH}",read-only=on \
+      -serial vc &
 
 printf "%s " "Press enter to stop QEMU instances"
 read -r _

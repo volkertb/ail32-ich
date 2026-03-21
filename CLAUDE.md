@@ -1,5 +1,9 @@
 # AIL/32 Project — Notes for Claude
 
+## Code Comments: Spell Out Acronyms and Hardware Details
+
+When writing comments in code, prefer more elaborate descriptions over terse acronym-only references. Hardware register names, bit flags, and protocol-specific terms should be explained at first use in each procedure or logical block. For example, write `PCM-out DMA status register (PO_SR_REG)` instead of just `PO_SR_REG`, and `DMA Controller Halted (DCH) bit` instead of just `DCH`. This makes the code accessible to reviewers who are not intimately familiar with the specific hardware (e.g. ICH AC'97 register layout). The goal is that someone reading the code can understand the intent without constantly cross-referencing datasheets or `.inc` files.
+
 ## Character Encoding: Stick to ASCII
 
 Source files (`.asm`, `.inc`, `.c`, `.h`) use `working-tree-encoding=IBM437` (see `.gitattributes`). They are stored as UTF-8 in the git repository but checked out as IBM437 (Code Page 437) on disk. This means:
@@ -117,7 +121,9 @@ Apply `-zc` to **all** C sources that are linked into an AIL/32 DLL. Also ensure
 
 ## AIL/32 Driver API Architecture
 
-Full API documentation is in `AIL_DOCS/API.TXT` (the AIL 3.14 manual, which AIL/32's `AIL_DOCS/READ.ME` defers to for API details). The C header `ail32.h` declares the public API consumed by games/applications.
+Full API documentation is in `AIL_DOCS/API.TXT` (the AIL 2.16 edition of the manual). AIL/32 is the 32-bit protected-mode variant of the AIL driver model, first introduced in AIL 2.14. The base AIL specification versions (2.14, 2.15, 2.16) define the API; AIL/32 has its own release numbers (1.00-1.05) for the protected-mode implementation. The `ail32.asm` Process Services module (Release 1.05) declares `CURRENT_REV equ 215` (API revision 2.15). Drivers declare a `min_API_version` in their DDT; the API rejects drivers that require a newer revision than it supports. Our driver sets `min_API_version dd 200` (v2.00), compatible with all AIL/32 releases. The digital sound interface is stable across all versions -- version differences are primarily XMIDI/synth related.
+
+The C header `ail32.h` declares the public API consumed by games/applications.
 
 ### Call flow: application → API → driver
 
@@ -156,12 +162,84 @@ These two functions have **distinct responsibilities** that must not be conflate
 
 The hardware init code from `ich2player/player.asm` lines 212–228 (BAR reads + PCI command register) belongs in `init_driver`, not `detect_device`.
 
+### Sample rate handling
+
+`ail32.asm` does **no sample rate conversion**. The `sound_buff.sample_rate` field contains a Sound Blaster **time constant byte** (not a frequency in Hz), and the driver receives it as-is. The reference driver (`dmasnd32.asm`) converts it to Hz via `freq = 1000000 / (256 - TC)` and programs the hardware directly.
+
+For the ICH driver: convert the SB time constant to Hz and program the AC'97 codec's VRA (Variable Rate Audio) sample rate register. The codec's native rate is 48 kHz; VRA allows any rate. To avoid unnecessary codec register writes (which take ~1ms each due to AC'97 link latency), cache the current rate and only reprogram when it actually changes. In practice, most games use a single sample rate throughout, so the codec write happens once on the first buffer.
+
+The ICH has a codec access semaphore register (`ACC_SEMA_REG`, NABMBAR+34h, `CODEC_BUSY` bit) that indicates when the AC'97 link is processing a register write. Polling this bit instead of using fixed delays could reduce the rate-switch overhead from ~1ms to ~100-200us, but this is a future optimization -- the fixed delays are fine for now.
+
+### Digital audio format handling (pack_type)
+
+The `sound_buff.pack_type` field uses Sound Blaster encoding. `ail32.asm` performs **no format conversion** -- it passes `pack_type` and raw PCM data straight through to the driver. The driver is fully responsible for interpreting the format and making the hardware play it.
+
+Supported `pack_type` values across drivers (`AIL_DOCS/NOTES.TXT`):
+
+| pack_type | Format | SB | SB Pro | PAS | Ad Lib Gold |
+|-----------|--------|----|----|-----|-------------|
+| 0 | 8-bit unsigned PCM, mono | Yes | Yes | Yes | Yes |
+| 1 | 4-bit ADPCM, mono | Yes | Yes | No | Yes |
+| 2 | 2.6-bit ADPCM, mono | Yes | Yes | No | Yes |
+| 3 | 2-bit ADPCM, mono | Yes | Yes | No | Yes |
+| 128 | 8-bit unsigned PCM, stereo | No | Yes | Yes | Yes |
+| 129 | 4-bit ADPCM, stereo | No | Yes | No | Yes |
+| 130 | 2.6-bit ADPCM, stereo | No | Yes | No | No |
+| 131 | 2-bit ADPCM, stereo | No | Yes | No | No |
+| 4 | 16-bit PCM, mono | No | No | No | Yes |
+| 132 | 16-bit PCM, stereo | No | No | No | Yes |
+
+Bit 7 (0x80) = stereo flag. Bits 0-2 = packing method.
+
+**ADPCM:** There is no software ADPCM decoder in AIL/32 or the drivers -- cards that support ADPCM (SB, Ad Lib Gold) decode it in hardware. Since most games supported both SB and PAS, and PAS does not support ADPCM, games that target both cards would not send ADPCM-compressed data to the driver. ADPCM support in the ICH driver is a nice-to-have for later but not a priority.
+
+**16-bit PCM:** Only the Ad Lib Gold driver supports pack_type 4/132. The `pack_modes`, `PRC_*_values`, and `SFC_*_values` arrays for 16-bit are entirely within `IFDEF ADLIBG` in `dmasnd32.asm`.
+
+**For the ICH driver:** The AC'97 DMA engine always transfers 16-bit signed stereo. The BDL length field counts **16-bit samples** (individual words), not stereo frames -- so for stereo data the count is `output_bytes / 2`. See `ichwav.asm` line 133: `FILESIZE / 2`. There is no hardware mode for 8-bit or mono. Format conversion is therefore required for all pack_types except possibly 16-bit signed stereo:
+
+| Input format | Conversion | Size factor |
+|---|---|---|
+| 8-bit unsigned mono (pack_type 0) | sign-convert + 16-bit expand + stereo dup | 4x |
+| 8-bit unsigned stereo (pack_type 128) | sign-convert + 16-bit expand | 2x |
+| 16-bit PCM mono (pack_type 4) | stereo duplication | 2x |
+| 16-bit PCM stereo (pack_type 132) | sign adjustment only (if unsigned) | 1x |
+| ADPCM (pack_types 1-3, 129-131) | software decode + above | varies |
+
+Since conversion always expands the data, in-place conversion is not possible. The driver allocates staging buffers via DPMI (INT 31h AX=0501h + AX=0600h to lock for DMA safety) at `register_sb` time based on the actual buffer size and pack_type. BDL entries point to the staging buffers, not the application's original data.
+
+The 8-bit-to-16-bit sign conversion is trivial: `sample_16 = (sample_8 XOR 80h) SHL 8` (two instructions per sample). On Pentium-class hardware (minimum for ICH), conversion of a full buffer is sub-millisecond.
+
+ADPCM support (software decoder) is a nice-to-have for later but not a priority -- most games that supported both SB and PAS would not send ADPCM data, since PAS does not support it.
+
+**Modularity note:** The AC'97/ICH fixed 16-bit stereo format is somewhat unusual among PCI-era sound devices. Intel HDA, Sound Blaster Live! (EMU10K1), and others accept configurable sample formats natively (8/16/24-bit, mono/stereo/multichannel). The format conversion code should be kept modular (separate from the DMA/BDL management) so that future AIL/32 drivers for other PCI sound devices can bypass it when the hardware accepts the application's native format directly.
+
+### serve_driver and timer-based polling
+
+The reference digital driver (`dmasnd32.asm`) uses `service_rate = -1` (no periodic service) and is fully interrupt-driven via hardware IRQ. Digital-only games never call `serve_driver` in this mode.
+
+The ICH driver uses `service_rate = 100` (100 Hz polling via `serve_driver`). When `service_rate > 0`, `ail32.asm`'s `AIL_init_driver()` automatically registers the driver's `serve_driver` (function ID 103) as a timer callback at the requested rate. The INT 8 handler dispatches it via `call timer_callback[esi]` -- no parameters, no return value.
+
+This avoids PCI IRQ complexity (PIC routing, shared interrupts, protected-mode IDT setup). The ~10ms polling latency only affects buffer recycling detection, not playback smoothness -- the DMA engine plays continuously from the BDL regardless of polling.
+
+### BDL (Buffer Descriptor List) design for AIL/32
+
+AIL/32's digital API exposes exactly 2 buffer slots (0 and 1). The ICH DMA engine supports 32 BDL entries but we only need 2: entry 0 for buffer 0, entry 1 for buffer 1. The DMA engine uses LVI (Last Valid Index) to know when to stop -- entries beyond LVI are never reached, so no zero-padding of unused entries is needed.
+
+Playback flow:
+1. App registers buffer 0 and buffer 1, calls `start_d_pb`
+2. Driver populates BDL entries 0 and 1, sets LVI=1, starts DMA (RPBM bit)
+3. DMA plays entry 0, advances CIV to 1
+4. `serve_driver` (polled at 100 Hz) detects CIV transition, marks `buff_status[0] = DAC_DONE`
+5. App sees buffer 0 done, refills it, re-registers -> driver updates BDL entry 0, advances LVI to wrap to 0
+6. Cycle continues in ping-pong fashion
+
 ### Reference source files
 
 - `dmasnd32.asm` — complete reference implementation of an AIL/32 digital sound driver (Sound Blaster, Pro Audio Spectrum, Ad Lib Gold variants via conditional assembly)
 - `ail32.inc` — function ID equates and shared macros
 - `ail32.h` — C API declarations for application developers
-- `AIL_DOCS/API.TXT` — full API documentation (covers both AIL 3.14 and AIL/32)
+- `AIL_DOCS/API.TXT` -- full API documentation (covers both AIL 2.14 and AIL/32)
+- `AIL_DOCS/NOTES.TXT` -- driver-specific technical notes (pack_type support, hardware quirks)
 - `AIL_DOCS/READ.ME` — AIL/32 release notes and addenda
 
 ## ich2player Source Code (ich_src/)
@@ -185,9 +263,32 @@ The `ich_src/` directory contains source files adapted from [ich2player](https:/
 
 **PCI access — no BIOS calls:** `pci.asm` uses direct I/O port access to `PCI_INDEX_PORT` (0CF8h) / `PCI_DATA_PORT` (0CFCh) throughout, which works fine from 32-bit protected mode under DOS/4GW. The original `pciBusDetect` used `int 1Ah` (PCI BIOS present check), but this has been replaced with a direct Config Mechanism #1 detection: write `BIT31` (80000000h) to 0CF8h and read it back — if the register retains the value, PCI is present. This avoids any real-mode BIOS call. Any system with ICH hardware is guaranteed to support PCI Config Mechanism #1.
 
+## Shared Utilities (util/)
+
+| File | Purpose |
+|------|---------|
+| `dpmi.asm` | Generic DPMI memory allocation helpers: `dpmi_alloc_staging` (allocate + lock) and `dpmi_free_staging` (unlock + free). Include-guarded (`DPMI_ASM_INCLUDED`). |
+| `to16s.asm` | PCM format conversion: `convert_to_16stereo` up-converts 8-bit unsigned or 16-bit signed (mono or stereo) to 16-bit signed stereo. Device-agnostic. Include-guarded (`TO16S_ASM_INCLUDED`). |
+
+These are reusable across AIL/32 drivers. The DPMI helpers operate on caller-defined per-slot arrays (`stg_addr`, `stg_size`, `stg_handle_hi`, `stg_handle_lo`). They are intentionally "dumb" -- they only perform the DPMI operations themselves. Safety decisions (e.g. "is DMA still reading from this buffer?") and free-and-reallocate sequencing belong in the caller (e.g. `register_sb` in the ICH driver).
+
+## Physical vs Linear Addressing for DMA (known bug)
+
+The AC'97 DMA engine is a PCI bus master -- it reads from **physical** (bus) memory addresses. The current driver writes **linear** addresses into the BDL entries and the BDL base address register (`PO_BDBAR_REG`). Under DOS/4GW, linear == physical is guaranteed only for conventional memory (below 1MB). Staging buffers allocated via DPMI INT 31h AX=0501h (extended memory) may have linear != physical if the DPMI host uses paging.
+
+This causes the DMA engine to read from wrong physical addresses, producing silence. Confirmed by testing: `stp32.exe` processes all buffers correctly (31 dots for `output.raw`), but no audible sound is produced.
+
+The `bdl_base` label (in the DLL's code segment) has the same issue -- `OFFSET bdl_base` is a linear address, not necessarily a physical one.
+
+Fix options:
+1. **Conventional memory** (DPMI INT 31h AX=0100h, below 1MB) -- linear == physical guaranteed, but conventional memory is scarce.
+2. **DPMI INT 31h AX=0800h** (Map Physical Address) or **Virtual DMA Services (VDS)** API to translate linear-to-physical -- the proper approach for DMA in protected mode.
+
+The reference `ichwav.asm` did not have this problem because it ran in 16-bit real mode where `segment*16` always equals the physical address.
+
 ## Current Work in Progress
 
-**`a32ichdg.dll`** — Digital sound driver for Intel ICHx AC'97 and compatible devices. `detect_device` and `init_driver` are implemented. Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O and saves the found PCI bus/device/function address in `ich_pci_addr`. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, and configures the codec at 44.1 kHz with max volume via `codecConfig`. Playback functions (`AIL_START_DIG_PLAY`, etc.) and `shutdown_driver` are not yet implemented.
+**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, and configures the codec. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo, writing to DPMI-allocated staging buffers that the BDL entries point to. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 mixer register writes for volume/pan, software ADPCM decoder (nice-to-have).
 
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 

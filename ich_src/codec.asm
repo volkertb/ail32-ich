@@ -28,12 +28,12 @@ ICH_CODEC_ASM_INCLUDED EQU 1
 ; ============================================================================
 ;
 ; Sets the PCM front DAC sample rate and optionally sets master + PCM output
-; volume to maximum (0 dB attenuation = 0x0000).
+; volume to a moderate default (~75%, 0x0C0C = ~18 dB attenuation).
 ;
 ; Entry:
 ;   AX = desired sample rate in Hz (e.g. 44100 for CD quality)
-;   BH = 'Y' to set output volume to maximum; any other value leaves
-;         volume unchanged (useful to avoid blasting speakers unexpectedly)
+;   BH = 'Y' to set output volume to ~75% (~18 dB attenuation); any
+;         other value leaves volume unchanged
 ;
 ; Exit:
 ;   All registers preserved.
@@ -44,8 +44,8 @@ ICH_CODEC_ASM_INCLUDED EQU 1
 ;     codec's Extended Audio Control register (2Ah, BIT0). If VRA is not
 ;     enabled, the codec ignores this write and runs at a fixed 48 kHz.
 ;   - Volume is controlled via two registers:
-;       CODEC_MASTER_VOL_REG (02h) ΓÇö overall analog output level
-;       CODEC_PCM_OUT_REG    (18h) ΓÇö PCM DAC output level
+;       CODEC_MASTER_VOL_REG (02h) -- overall analog output level
+;       CODEC_PCM_OUT_REG    (18h) -- PCM DAC output level
 ;     Writing 0x0000 to both sets maximum volume on both L and R channels.
 ;
 codecConfig proc public
@@ -74,12 +74,13 @@ codecConfig proc public
 
 noSis7012QuirksNeeded:
 
-        ; Set master volume to maximum (0 dB attenuation).
+        ; Set master volume to a moderate level (~75%).
         ; Register format: bits 13:8 = left attenuation, bits 5:0 = right attenuation.
-        ; All zeros = no attenuation = full volume on both channels.
+        ; Each step is ~1.5 dB. 0x0000 = max (0 dB), 0x3F3F = min (~94.5 dB down).
+        ; 0x0C0C = 12 steps = ~18 dB attenuation, a safe default.
         mov     dx, ds:[NAMBAR]
         add     dx, CODEC_MASTER_VOL_REG        ; offset 02h
-        xor     ax, ax                          ; 0x0000 = max volume both channels
+        mov     ax, 0C0Ch                       ; ~75% volume both channels
         out     dx, ax
 
         call    delay1_4ms
@@ -87,11 +88,10 @@ noSis7012QuirksNeeded:
         call    delay1_4ms
         call    delay1_4ms
 
-        ; Set PCM output volume to maximum as well.
+        ; Set PCM output volume to match (same moderate level).
         mov     dx, ds:[NAMBAR]
         add     dx, CODEC_PCM_OUT_REG           ; offset 18h
-        out     dx, ax                          ; ax is still 0 from above
-        ; (xor ax,ax not needed again ΓÇö ax was not modified)
+        out     dx, ax                          ; ax is still 0x0C0C from above
 
         call    delay1_4ms
         call    delay1_4ms
