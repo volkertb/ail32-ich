@@ -9,7 +9,7 @@
 ; (config register 10h) of the ICH audio device.
 ;
 ; All registers are 16 bits wide. Access to codec registers over the AC'97 link
-; is defined by the OEM. Not all codecs implement all registers ΓÇö refer to the
+; is defined by the OEM. Not all codecs implement all registers - refer to the
 ; datasheet for your specific codec.
 ;
 ; Secondary codec registers are accessed by ORing BIT7 into the register offset.
@@ -90,7 +90,7 @@ CODEC_VENDORID2_REG             equ     7eh     ; codec vendor ID word 2
 ; work even without a fully functional codec attached.
 ;
 ; When two codecs are present, OR the register offset with BIT7 to access the
-; secondary codec's register space (80hΓÇôFEh).
+; secondary codec's register space (80h-FEh).
 
 PRIMARY_CODEC                   equ     0       ; 00h-7Fh = primary codec
 SECONDARY_CODEC                 equ     BIT7    ; 80h-FEh = secondary codec

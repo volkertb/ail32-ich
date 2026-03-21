@@ -1,5 +1,15 @@
 # AIL/32 Project — Notes for Claude
 
+## Character Encoding: Stick to ASCII
+
+Source files (`.asm`, `.inc`, `.c`, `.h`) use `working-tree-encoding=IBM437` (see `.gitattributes`). They are stored as UTF-8 in the git repository but checked out as IBM437 (Code Page 437) on disk. This means:
+
+- **Always prefer ASCII characters in generated code and comments.** ASCII is the subset shared by IBM437, UTF-8, and every other common encoding. Use plain `-` instead of em/en dashes, straight `'`/`"` instead of curly quotes, `...` instead of the ellipsis character, etc.
+- **In actual source code (beyond comments), be even stricter** -- only use ASCII unless it genuinely cannot suffice. Non-ASCII in code risks assembler/compiler errors after encoding round-trips.
+- **Do not attempt to fix encoding issues.** The Edit tool writes UTF-8 bytes, which corrupts IBM437 high bytes (e.g. `0x82` for e-acute, box-drawing characters) on every edit. Fixing them creates a fix-edit-re-mangle cycle. The maintainer handles encoding corrections manually.
+- **Do not convert existing non-ASCII characters** in the codebase. If something existing needs to be touched, ask the maintainer first.
+- **Why this matters:** Files may be read or edited in DOS (CP437) or in a modern IDE (UTF-8). Some developers and maintainers may choose to work on these files in a DOS-based editor. ASCII is the lowest common denominator that works everywhere without conversion issues.
+
 ## Toolchain
 
 - **Assembler:** JWasm (`jwasm`)

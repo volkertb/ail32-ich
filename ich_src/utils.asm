@@ -20,7 +20,7 @@ ICH_UTILS_ASM_INCLUDED EQU 1
 ;
 ; This is a hardware-based delay that works regardless of CPU speed, unlike
 ; loop-based delays. Used by codec.asm to give the AC'97 codec time to
-; process register writes ΓÇö codec I/O is asynchronous and much slower than
+; process register writes - codec I/O is asynchronous and much slower than
 ; the CPU.
 ;
 ; Entry: None
@@ -45,9 +45,9 @@ delay1_4ms PROC public
         in      al, PORTB                       ; read system control port B
         and     al, REFRESH_STATUS              ; isolate the refresh toggle bit
         cmp     ah, al                          ; has it changed since last read?
-        je      @b                              ; no ΓÇö keep polling
+        je      @b                              ; no - keep polling
 
-        mov     ah, al                          ; yes ΓÇö record new state
+        mov     ah, al                          ; yes - record new state
         dec     cx                              ; one more toggle counted
         jnz     @b                              ; loop until all toggles counted
 

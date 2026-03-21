@@ -1,6 +1,6 @@
 ; SPDX-FileType: SOURCE
 ; SPDX-FileContributor: Originally developed and shared by Jeff Leyda <jeff@silent.net>
-; SPDX-FileContributor: Modified by Volkert de Buisonj∩┐╜
+; SPDX-FileContributor: Modified by Volkert de Buisonjé
 ; SPDX-License-Identifier: CC0-1.0
 ;
 ;	PCI device register reader/writers.
@@ -24,7 +24,7 @@ pciBusDetect proc public
         push    eax
         push    edx
         mov     dx, PCI_INDEX_PORT
-        mov     eax, BIT31              ; 80000000h ΓÇö CONFIG_ADDRESS enable bit
+        mov     eax, BIT31              ; 80000000h - CONFIG_ADDRESS enable bit
         out     dx, eax
         in      eax, dx
         cmp     eax, BIT31              ; ZF set if PCI Config Mechanism #1 present

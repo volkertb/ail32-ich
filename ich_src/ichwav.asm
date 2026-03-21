@@ -18,7 +18,7 @@
 ;                               Polls CIV            <--     CIV advances as buffers play
 ;                               Refreshes inactive buf       LVI prevents overrun
 ;
-; The DMA engine processes buffers in round-robin order (indices 0ΓÇô31).
+; The DMA engine processes buffers in round-robin order (indices 0-31).
 ; We use pairs of BDL entries: even entries point to WAV_BUFFER1, odd entries
 ; point to WAV_BUFFER2. While the DMA plays from one buffer, we refill the
 ; other from disk.
@@ -26,7 +26,7 @@
 ; IMPORTANT: This file uses 16-bit real-mode segmented addressing (.MODEL small).
 ; Buffer addresses are stored as segments and converted to linear addresses via
 ; "shl eax, 4" (segment * 16). When adapting for a 32-bit flat-model driver
-; (like AIL/32), use linear addresses directly ΓÇö no segment conversion needed.
+; (like AIL/32), use linear addresses directly - no segment conversion needed.
 ;
 
         .DOSSEG
@@ -102,10 +102,10 @@ playWav proc public
        ; --- Step 4: Build the Buffer Descriptor List (BDL) ---
        ;
        ; The BDL is an array of up to 32 entries, each 8 bytes:
-       ;   Bytes 0ΓÇô3: Physical address of audio data (linear, dword-aligned)
-       ;   Bytes 4ΓÇô7: Control + sample count
+       ;   Bytes 0-3: Physical address of audio data (linear, dword-aligned)
+       ;   Bytes 4-7: Control + sample count
        ;     Bit 31 (IOC):  Fire interrupt on buffer completion
-       ;     Bit 30 (BUP):  Buffer Underrun Policy ΓÇö play silence if underrun
+       ;     Bit 30 (BUP):  Buffer Underrun Policy - play silence if underrun
        ;     Bits 15:0:     Number of 16-bit samples in this buffer
        ;                    (For stereo 16-bit audio, each "sample" is one
        ;                     L+R pair = 4 bytes, so FFFF samples = 256 KB.
@@ -268,7 +268,7 @@ loadFromFile proc public
         ; Short read: we hit EOF
         or      es:[flags], ENDOFFILE
         call    padfill                         ; zero-pad the rest of the buffer
-        clc                                     ; don't signal EOF *yet* ΓÇö let this
+        clc                                     ; don't signal EOF *yet* - let this
         jmp     endLFF                          ; buffer play before exiting
 
 @@:
@@ -370,7 +370,7 @@ setNewIndex proc
         jnz     @f
         ; Normal case: keep playing forever
         dec     al                              ; LVI = CIV - 1
-        and     al, INDEX_MASK                  ; wrap to 0ΓÇô31 range
+        and     al, INDEX_MASK                  ; wrap to 0-31 range
 @@:
         call    setLastValidIndex               ; write new LVI
         clc
@@ -383,10 +383,10 @@ setNewIndex endp
 ; getCurrentIndex - Read the Current Index Value (CIV)
 ; ============================================================================
 ;
-; Returns which BDL entry the DMA engine is currently processing (0ΓÇô31).
+; Returns which BDL entry the DMA engine is currently processing (0-31).
 ;
 ; Entry: None
-; Exit:  AL = current BDL index (0ΓÇô31)
+; Exit:  AL = current BDL index (0-31)
 ;
 getCurrentIndex proc
         push    dx
@@ -402,7 +402,7 @@ getCurrentIndex endp
 ; setLastValidIndex - Write the Last Valid Index (LVI) register
 ; ============================================================================
 ;
-; Entry: AL = index value to write (0ΓÇô31)
+; Entry: AL = index value to write (0-31)
 ; Exit:  None
 ;
 setLastValidIndex proc
