@@ -305,3 +305,39 @@ The translation happens at staging buffer allocation time (typically twice per g
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 
 `testlib.c` currently calls mpaland/printf three times and spins in an infinite loop — this is intentional for isolated testing in FreeDOS/QEMU. The printf output is confirmed working once the single-object constraint is satisfied via `-zc`.
+
+## TODO
+
+### Conventional memory fallback for PHYSADDR_NONE
+
+Re-add `dpmi_alloc_conv` as a fallback in `register_sb` when `physaddr_detect` returns `PHYSADDR_NONE` (no translation method available). Conventional memory (below 1 MB) is identity-mapped regardless of DPMI host, so no translation is needed. This was the original allocation method before extended memory staging buffers were implemented.
+
+### physaddr test matrix
+
+The physaddr module's multi-tier fallback needs testing across different DOS environments to verify each code path. The current test environment (FreeDOS + Jemm + DOS/4GW in QEMU) only exercises the VDS path.
+
+**Environments to test:**
+
+- FreeDOS bare (no EMM, no HIMEM) + DOS/4GW -- tests PHYSADDR_NONE fallback (once implemented); no VDS, no paging
+- FreeDOS + HIMEMX (no EMM) + DOS/4GW -- XMS/A20 but no VDS or page remapping
+- FreeDOS + Jemm386 + DOS/4GW -- current baseline (VDS path)
+- FreeDOS + DOS/32A instead of DOS/4GW -- ring 0 page table walk (DOS/32A runs at ring 0); may also test identity probe if DOS/32A supports DPMI 0800h
+- FreeDOS + QEMM (if available) + DOS/4GW -- alternative VDS provider
+- Windows 95/98 DOS session -- DPMI host is Windows VMM; different paging/VDS behavior
+- Windows 95/98 DOS session + DOS/32A -- ring 0 may not be available under Windows VMM
+- Real hardware (if available) -- verify behavior outside emulation
+
+**What to verify in each environment:**
+
+- Which physaddr tier is selected (enable DEBUG_SERIAL to check)
+- Whether physical addresses match linear addresses or differ
+- Audio plays correctly (no silence, no corruption)
+- Clean shutdown (no page fault)
+- Multiple buffer cycles (play a long file to exercise re-registration)
+
+### Other TODOs
+
+- `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation
+- AC'97 mixer register writes for volume/pan
+- Software ADPCM decoder (nice-to-have)
+- Debug serial output throttling in `serve_driver` (polled serial I/O at 100 Hz is too slow for real-time playback)
