@@ -25,6 +25,12 @@ RUN groupadd --gid $USER_GID $USERNAME \
 
 #RUN --mount=type=cache,target="/home/$USERNAME/.claude/downloads" chown -R $USERNAME /home/$USERNAME/.claude
 
+# Install tools that help Claude with debugging and troubleshooting
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt -y update \
+    && apt -y install nasm xxd python3
+
 # Switch from root to the default user. See https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 USER $USERNAME
 
