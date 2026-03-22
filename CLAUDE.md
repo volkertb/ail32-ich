@@ -23,6 +23,15 @@ Source files (`.asm`, `.inc`, `.c`, `.h`) use `working-tree-encoding=IBM437` (se
   - `/opt/watcom/h` — DOS target headers (`dos.h`, `io.h`, etc.) — needed for building `.exe` targets
   - `/opt/watcom/lh` — Linux host headers — this is what the `INCLUDE` env var points to by default, but it is NOT what we want for cross-compiling to DOS
 
+## Debugging Tools
+
+The following tools are useful for binary analysis, debugging, and troubleshooting. If any are missing from the dev container, advise the user to install them:
+
+- **ndisasm** (NASM package) — disassemble raw binary/DLL sections to verify instruction encoding, inspect BDL contents, etc.
+- **xxd** — hex dump files and binary data (DLL headers, staging buffer dumps, BDL entries)
+- **wdump** (Open Watcom) — LX object/fixup/header inspection for DLL validation
+- **python3** — quick calculations (address arithmetic, page table walks, SB time constant conversions) and scripting for binary analysis
+
 ## Calling Conventions and Symbol Name Decoration
 
 This is the most important gotcha in this project:
@@ -267,28 +276,31 @@ The `ich_src/` directory contains source files adapted from [ich2player](https:/
 
 | File | Purpose |
 |------|---------|
-| `dpmi.asm` | Generic DPMI memory allocation helpers: `dpmi_alloc_staging` (allocate + lock) and `dpmi_free_staging` (unlock + free). Include-guarded (`DPMI_ASM_INCLUDED`). |
+| `dbgser.asm` | Serial port debug output (polled). Provides `dbg_char`, `dbg_hex8`/`16`/`32`, `dbg_str`, `dbg_crlf`, `dbg_label_hex16`/`32`. Reads COM port base from BDA. All code is conditional on `DEBUG_SERIAL` being defined. Include-guarded (`DBGSER_ASM_INCLUDED`). |
+| `dpmi.asm` | Generic DPMI memory allocation helpers: `dpmi_alloc_staging` (allocate + lock), `dpmi_free_staging` (unlock + free), `dpmi_alloc_conv` and `dpmi_free_conv` (conventional memory). Include-guarded (`DPMI_ASM_INCLUDED`). |
+| `physaddr.asm` | Physical address translation for PCI bus master DMA. Multi-tier fallback: identity mapping probe, ring 0 page table walk, VDS (Virtual DMA Services), conventional memory. API: `physaddr_detect`, `physaddr_translate`, `physaddr_release_lock`, `physaddr_shutdown`. Conditionally includes `dbgser.asm` for debug output when `DEBUG_SERIAL` is defined. Include-guarded (`PHYSADDR_ASM_INCLUDED`). |
 | `to16s.asm` | PCM format conversion: `convert_to_16stereo` up-converts 8-bit unsigned or 16-bit signed (mono or stereo) to 16-bit signed stereo. Device-agnostic. Include-guarded (`TO16S_ASM_INCLUDED`). |
 
 These are reusable across AIL/32 drivers. The DPMI helpers operate on caller-defined per-slot arrays (`stg_addr`, `stg_size`, `stg_handle_hi`, `stg_handle_lo`). They are intentionally "dumb" -- they only perform the DPMI operations themselves. Safety decisions (e.g. "is DMA still reading from this buffer?") and free-and-reallocate sequencing belong in the caller (e.g. `register_sb` in the ICH driver).
 
-## Physical vs Linear Addressing for DMA (known bug)
+## Physical vs Linear Addressing for DMA
 
-The AC'97 DMA engine is a PCI bus master -- it reads from **physical** (bus) memory addresses. The current driver writes **linear** addresses into the BDL entries and the BDL base address register (`PO_BDBAR_REG`). Under DOS/4GW, linear == physical is guaranteed only for conventional memory (below 1MB). Staging buffers allocated via DPMI INT 31h AX=0501h (extended memory) may have linear != physical if the DPMI host uses paging.
+The AC'97 DMA engine is a PCI bus master -- it reads from **physical** (bus) memory addresses. DPMI applications work with linear (virtual) addresses. Under paging, linear != physical for extended memory. The BDL (Buffer Descriptor List) itself is allocated in conventional memory (below 1 MB) where linear == physical is guaranteed, but staging buffers use extended memory via DPMI INT 31h AX=0501h.
 
-This causes the DMA engine to read from wrong physical addresses, producing silence. Confirmed by testing: `stp32.exe` processes all buffers correctly (31 dots for `output.raw`), but no audible sound is produced.
+The `physaddr.asm` module (`util/physaddr.asm`) handles the linear-to-physical translation with a multi-tier fallback strategy, detected once at `init_driver` time via `physaddr_detect`:
 
-The `bdl_base` label (in the DLL's code segment) has the same issue -- `OFFSET bdl_base` is a linear address, not necessarily a physical one.
+1. **Identity mapping probe** -- allocates a test block, writes a magic pattern, uses DPMI AX=0800h (Map Physical Address) to create a second mapping, and does two-way verification. Works when the DPMI host does not remap extended memory (common with DOS/4GW without EMM386). Cheapest method at lookup time (no-op).
+2. **Ring 0 page table walk** -- checks CPL from CS selector; if ring 0 (e.g. DOS/32A), reads CR3 and walks page directory/table entries to find the physical frame. Handles both 4 KB pages and 4 MB PSE pages. Caches the last page table mapping.
+3. **Virtual DMA Services (VDS)** -- checks BDA flag at 40:7Bh bit 5; if present (EMM386, QEMM, JEMMEX), calls INT 4Bh AX=8103h (Lock DMA Region) via DPMI real-mode interrupt simulation. Requires a 16-byte DDS in conventional memory. Returns a lock handle that must be released via `physaddr_release_lock` before freeing the buffer.
+4. **PHYSADDR_NONE** -- no translation available. The caller (`register_sb`) must fall back to conventional memory allocation where linear == physical is guaranteed.
 
-Fix options:
-1. **Conventional memory** (DPMI INT 31h AX=0100h, below 1MB) -- linear == physical guaranteed, but conventional memory is scarce.
-2. **DPMI INT 31h AX=0800h** (Map Physical Address) or **Virtual DMA Services (VDS)** API to translate linear-to-physical -- the proper approach for DMA in protected mode.
+**Current status:** In the QEMU test environment, VDS is selected (the identity and ring 0 probes both fail because DOS/4GW does not support DPMI AX=0800h for RAM addresses). Staging buffers in extended memory did not produce sound when linear addresses were used directly in BDL entries; the physaddr translation via VDS was required to get working audio. A conventional memory fallback for `PHYSADDR_NONE` (allocating staging buffers below 1 MB where identity mapping is guaranteed) is planned but not yet implemented.
 
-The reference `ichwav.asm` did not have this problem because it ran in 16-bit real mode where `segment*16` always equals the physical address.
+The translation happens at staging buffer allocation time (typically twice per game session in `register_sb`), not on the DMA hot path. The physical addresses are stored in `stg_phys[]` and written into BDL entries by `serve_driver` and `start_d_pb`.
 
 ## Current Work in Progress
 
-**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, and configures the codec. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo, writing to DPMI-allocated staging buffers that the BDL entries point to. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 mixer register writes for volume/pan, software ADPCM decoder (nice-to-have).
+**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, configures the codec, and detects the physical address translation method via `physaddr_detect`. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo, writing to DPMI-allocated extended memory staging buffers. Physical addresses for BDL entries are obtained via `physaddr_translate` at allocation time and stored in `stg_phys[]`. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 mixer register writes for volume/pan, software ADPCM decoder (nice-to-have), conventional memory fallback when `physaddr_detect` returns `PHYSADDR_NONE`.
 
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 

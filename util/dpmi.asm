@@ -44,34 +44,35 @@ dpmi_alloc_staging PROC NEAR
                 ;DPMI Allocate Memory Block (INT 31h AX=0501h)
                 ;BX:CX = size in bytes
                 push    ebx                     ;save slot index
-                push    ecx                     ;save requested size (INT 31h returns
-                                                ;the handle in SI:DI, clobbering EDI)
+                push    ecx                     ;save requested size
                 mov     eax, ecx
                 shr     eax, 16
                 mov     ebx, eax                ;BX = high word of size
                 and     ecx, 0FFFFh             ;CX = low word of size
                 mov     ax, 0501h
                 int     31h
-                pop     edi                     ;EDI = requested size (safe from INT 31h)
+                pop     edx                     ;EDX = requested size (pop into EDX,
+                                                ;NOT EDI -- INT 31h returns the DPMI
+                                                ;handle in SI:DI and we must preserve DI)
                 pop     eax                     ;restore slot index into EAX
                 jc      __fail
 
-                ;BX:CX = linear address, SI:DI = handle (DI was clobbered
-                ;by INT 31h, but we restored the size into EDI from the stack)
+                ;BX:CX = linear address, SI:DI = DPMI memory handle
                 mov     stg_handle_hi[eax*2], si
                 mov     stg_handle_lo[eax*2], di
                 shl     ebx, 16
                 or      ebx, ecx                ;EBX = full linear address
                 mov     stg_addr[eax*4], ebx
-                mov     stg_size[eax*4], edi
+                mov     stg_size[eax*4], edx
 
                 ;DPMI Lock Linear Region (INT 31h AX=0600h)
                 ;BX:CX = linear address, SI:DI = size
                 mov     ecx, ebx
                 shr     ebx, 16                 ;BX = high word of address
                 and     ecx, 0FFFFh             ;CX = low word of address
-                mov     esi, edi
+                mov     esi, edx
                 shr     esi, 16                 ;SI = high word of size
+                mov     edi, edx
                 and     edi, 0FFFFh             ;DI = low word of size
                 mov     ax, 0600h
                 int     31h

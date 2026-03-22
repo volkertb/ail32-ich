@@ -1,4 +1,3 @@
-; SPDX-FileType: SOURCE
 ; SPDX-FileCopyrightText: Copyright (C) 1991-1993 Miles Design, Inc.
 ; SPDX-FileCopyrightText: Copyright (C) 2023 Volkert de Buisonjé
 ; SPDX-FileContributor: Volkert de Buisonjé
@@ -203,6 +202,8 @@ stg_size        dd 2 dup (0)            ;Allocated size in bytes of each staging
 stg_handle_hi   dw 2 dup (0)            ;DPMI memory handle (SI from INT 31h/0501h)
 stg_handle_lo   dw 2 dup (0)            ;DPMI memory handle (DI from INT 31h/0501h)
 stg_samples     dd 2 dup (0)            ;16-bit stereo sample count for BDL (= converted size / 2)
+stg_phys        dd 2 dup (0)            ;Physical address of each staging buffer (for BDL/DMA)
+stg_lock        dd 2 dup (0)            ;VDS lock handle per buffer (0 if not VDS)
 
                 ;
                 ;Buffer Descriptor List (BDL) -- 2 entries x 8 bytes = 16 bytes
@@ -273,8 +274,7 @@ dbg_s_done      db 'ALL_DONE',0
 dbg_s_adv_lvi   db 'ADV_LVI',0
 ENDIF ; DEBUG_SERIAL
 
-                ; TODO: add any other internal procedures here.
-
+                INCLUDE util/physaddr.asm
                 INCLUDE util/to16s.asm
 
 ;----------------------------------------------------------------------------
@@ -529,6 +529,17 @@ IFDEF DEBUG_SERIAL
 ENDIF ; DEBUG_SERIAL
 
                 ;
+                ;Detect physical address translation method for staging
+                ;buffers. The PCI bus master DMA engine needs physical
+                ;addresses in BDL entries; physaddr_detect probes for
+                ;identity mapping, ring 0 page table walk, or VDS.
+                ;If no method is found (PHYSADDR_NONE), register_sb
+                ;falls back to conventional memory allocation.
+                ;
+
+                call    physaddr_detect
+
+                ;
                 ;Initialize playback state
                 ;
 
@@ -569,11 +580,24 @@ shutdown_driver PROC USES ebx esi edi,\
                 mov     al, RR
                 out     dx, al
 
-                ;Free staging buffers (conventional memory)
+                ;Release VDS locks on staging buffers (no-op if not VDS)
+                mov     eax, stg_addr[0*4]
+                mov     ecx, stg_size[0*4]
+                mov     edx, stg_lock[0*4]
+                call    physaddr_release_lock
+                mov     eax, stg_addr[1*4]
+                mov     ecx, stg_size[1*4]
+                mov     edx, stg_lock[1*4]
+                call    physaddr_release_lock
+
+                ;Free staging buffers (extended memory)
                 mov     ebx, 0
-                call    dpmi_free_conv
+                call    dpmi_free_staging
                 mov     ebx, 1
-                call    dpmi_free_conv
+                call    dpmi_free_staging
+
+                ;Free physaddr internal resources
+                call    physaddr_shutdown
 
                 ;Free BDL conventional memory block
                 cmp     bdl_phys, 0
@@ -726,7 +750,7 @@ __dch_clear_sr:
                 ;and record slot-to-BDL mapping for serve_driver
                 mov     bdl_slot[0*4], ecx
                 mov     edx, bdl_phys
-                mov     eax, stg_addr[ecx*4]
+                mov     eax, stg_phys[ecx*4]
                 mov     DWORD PTR [edx], eax
                 mov     eax, stg_samples[ecx*4]
                 mov     DWORD PTR [edx+4], eax
@@ -773,7 +797,7 @@ ENDIF ; DEBUG_SERIAL
                 mov     buff_status[ecx*4], DAC_PLAYING
                 mov     bdl_slot[1*4], ecx
                 mov     edx, bdl_phys
-                mov     eax, stg_addr[ecx*4]
+                mov     eax, stg_phys[ecx*4]
                 mov     DWORD PTR [edx+8], eax
                 mov     eax, stg_samples[ecx*4]
                 mov     DWORD PTR [edx+12], eax
@@ -854,7 +878,7 @@ ENDIF ; DEBUG_SERIAL
                 ;and record slot-to-BDL mapping for serve_driver
                 mov     bdl_slot[1*4], ecx
                 mov     edx, bdl_phys
-                mov     eax, stg_addr[ecx*4]
+                mov     eax, stg_phys[ecx*4]
                 mov     DWORD PTR [edx+8], eax
                 mov     eax, stg_samples[ecx*4]
                 mov     DWORD PTR [edx+12], eax
@@ -954,10 +978,20 @@ __stg_alloc:
                 mov     ebx, edi
                 cmp     stg_addr[ebx*4], 0
                 je      __stg_do_alloc
-                call    dpmi_free_conv
+
+                ;Release VDS lock before freeing (no-op if not VDS)
+                mov     eax, stg_addr[ebx*4]
+                mov     ecx, stg_size[ebx*4]
+                mov     edx, stg_lock[ebx*4]
+                call    physaddr_release_lock
+                mov     stg_phys[edi*4], 0
+                mov     stg_lock[edi*4], 0
+
+                mov     ebx, edi
+                call    dpmi_free_staging
 
 __stg_do_alloc: mov     ebx, edi
-                call    dpmi_alloc_conv         ;EBX=index, ECX=size
+                call    dpmi_alloc_staging      ;EBX=index, ECX=size
                 jc      __fail
 
 __stg_ok:
@@ -968,8 +1002,17 @@ __stg_ok:
                 call    convert_to_16stereo
                 pop     edi
 
+                ;Translate staging buffer linear address to physical address
+                ;for PCI bus master DMA. The BDL entries need physical addresses.
+                mov     eax, stg_addr[edi*4]
+                mov     ecx, stg_size[edi*4]
+                call    physaddr_translate
+                jc      __fail
+                mov     stg_phys[edi*4], eax
+                mov     stg_lock[edi*4], edx
+
                 ;Mark buffer as ready to play. Do NOT write BDL entries here --
-                ;serve_driver's RESTART and ADV_LVI paths copy stg_addr/stg_samples
+                ;serve_driver's RESTART and ADV_LVI paths copy stg_phys/stg_samples
                 ;into the correct BDL entry when the buffer is actually queued.
                 ;Writing here would risk corrupting an active BDL entry (RESTART
                 ;maps any buffer slot to entry 0, so entry N may be in use by a
@@ -980,9 +1023,8 @@ IFDEF DEBUG_SERIAL
                 push    eax
                 push    esi
 
-                ;Print staging buffer linear address (written into BDL entry;
-                ;NOTE: the DMA engine needs a physical address here -- if
-                ;linear != physical, this is the root cause of no sound)
+                ;Print staging buffer linear address and physical address
+                ;(physaddr_translate maps linear -> physical for BDL entries)
                 mov     esi, OFFSET dbg_s_stgaddr
                 mov     eax, stg_addr[edi*4]
                 call    dbg_label_hex32
@@ -1083,7 +1125,7 @@ ENDIF ; DEBUG_SERIAL
                 mov     buff_status[ebx*4], DAC_PLAYING
                 mov     bdl_slot[0*4], ebx
                 mov     edx, bdl_phys
-                mov     eax, stg_addr[ebx*4]
+                mov     eax, stg_phys[ebx*4]
                 mov     DWORD PTR [edx], eax
                 mov     eax, stg_samples[ebx*4]
                 mov     DWORD PTR [edx+4], eax
@@ -1098,7 +1140,7 @@ ENDIF ; DEBUG_SERIAL
                 mov     buff_status[ecx*4], DAC_PLAYING
                 mov     bdl_slot[1*4], ecx
                 mov     edx, bdl_phys
-                mov     eax, stg_addr[ecx*4]
+                mov     eax, stg_phys[ecx*4]
                 mov     DWORD PTR [edx+8], eax
                 mov     eax, stg_samples[ecx*4]
                 mov     DWORD PTR [edx+12], eax
