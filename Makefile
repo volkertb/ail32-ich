@@ -20,6 +20,10 @@ WLINK=wlink  # When set to jwlink instead of wlink, applications like stp32.exe 
 
 ASMFLAGS=-q -c -W0 -Cp -Zd
 
+# Uncomment to enable serial debug output in drivers (polled, COM1).
+# Use with QEMU's -serial stdio or -serial file:debug.log.
+#DBGFLAGS = -DDEBUG_SERIAL
+
 # Watcom installations in Linux typically only include $(WATCOM)/lh in the INCLUDE environment variable.
 # But the DOS header files are in $(WATCOM)/h and those are needed for building stp32.exe and such.
 CFLAGS=-q -I$(WATCOM)/h
@@ -205,8 +209,8 @@ a32pasdg.dll: dmasnd32.asm ail32.inc 386.mac
 
 a32ichdg.dll: a32ichdg.asm ail32.inc 386.mac ich_src/constant.inc ich_src/detect.asm ich_src/pci.asm \
 			  ich_src/ich2ac97.inc ich_src/codec.asm ich_src/codec.inc ich_src/utils.asm \
-			  util/dpmi.asm util/to16s.asm util/dbgser.asm bld_info.inc
-	$(ML) $(ASMFLAGS) -DPAS -DDPMI -Foa32ichdg.o a32ichdg.asm
+			  util/dpmi.asm util/physaddr.asm util/to16s.asm util/dbgser.asm bld_info.inc
+	$(ML) $(ASMFLAGS) $(DBGFLAGS) -DPAS -DDPMI -Foa32ichdg.o a32ichdg.asm
 	$(WLINK) $(LFLAGS) n $@ f a32ichdg.o format os2 lx dll
 	$(call VALIDATE_AIL32_DLL,$@)
 
