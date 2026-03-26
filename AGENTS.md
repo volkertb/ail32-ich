@@ -1,3 +1,5 @@
+**IMPORTANT: CLAUDE.md is a symlink to AGENTS.md. Always use AGENTS.md directly for both reading and writing. Do not read or write via the CLAUDE.md symlink.**
+
 # AIL/32 Project — Notes for Claude
 
 ## Code Comments: Spell Out Acronyms and Hardware Details
