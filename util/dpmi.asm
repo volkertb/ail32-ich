@@ -5,9 +5,21 @@
 ;
 ; DPMI Memory Helper Routines
 ;
-; Generic DPMI memory allocation and deallocation routines for use by
-; AIL/32 drivers that need dynamically allocated, DMA-safe memory
-; (e.g. staging buffers for format conversion).
+; DMA-safe memory allocation for AIL/32 drivers. The public API is:
+;
+;   dpmi_alloc_staging  -- allocate a DMA-safe buffer, return physical address
+;   dpmi_free_staging   -- free a previously allocated buffer
+;
+; On the first call to dpmi_alloc_staging, the physical address translation
+; method is auto-detected via physaddr_detect. Based on the result:
+;
+;   - If a translation method is available (identity, ring 0 page table
+;     walk, or VDS), extended memory is allocated via DPMI INT 31h
+;     AX=0501h and the physical address is obtained via physaddr_translate.
+;
+;   - If no translation method is available (PHYSADDR_NONE), conventional
+;     memory (below 1 MB) is allocated via DPMI INT 31h AX=0100h, where
+;     linear == physical is guaranteed.
 ;
 ; Prerequisites: The including file must define the following variables
 ; before this file is included. The routines take a slot index in EBX
@@ -25,21 +37,147 @@
 IFNDEF DPMI_ASM_INCLUDED
 DPMI_ASM_INCLUDED EQU 1
 
+;Include the physical address translation module. It has its own include
+;guard (PHYSADDR_ASM_INCLUDED) so double-inclusion is harmless.
+                INCLUDE util/physaddr.asm
+
+;Per-slot VDS lock handle, used by dpmi_free_staging to release VDS locks
+;before freeing extended memory buffers. Only nonzero when physaddr_method
+;is PHYSADDR_VDS.
+stg_vds_lock    dd 2 dup (0)
+
 ;----------------------------------------------------------------------------
-; dpmi_alloc_staging -- Allocate a memory block via DPMI and lock it
+; dpmi_alloc_staging -- Allocate a DMA-safe memory block
+;
+; Chooses extended or conventional memory based on the detected physical
+; address translation method. On the first call, physaddr_detect is called
+; automatically to determine the available method.
 ;
 ; The target slot (stg_addr[ebx*4]) must be 0 (not in use). If the slot
 ; is already allocated, the caller must free it first via dpmi_free_staging.
+;
+; Entry: EBX = slot index, ECX = required size in bytes
+; Exit:  CF clear on success:
+;          - stg_addr/stg_size/stg_handle updated
+;          - EAX = physical address (for BDL/DMA use)
+;        CF set on failure (slot unchanged)
+; Destroys: ECX, EDX (other regs preserved via pushes)
+;
+dpmi_alloc_staging PROC NEAR
+                ;Auto-detect physical address translation method on first call.
+                ;physaddr_method is 0 until physaddr_detect has been called.
+                ;Save EBX (slot index) and ECX (size) across the call because
+                ;physaddr_detect and its internal probes destroy EAX-EDX, ESI, EDI.
+                cmp     physaddr_method, 0
+                jne     __as_detected
+                push    ebx
+                push    ecx
+                call    physaddr_detect
+                pop     ecx
+                pop     ebx
+__as_detected:
+
+                cmp     physaddr_method, PHYSADDR_NONE
+                je      __alloc_conv
+
+                ;--- Extended memory path (translation available) ---
+                call    __alloc_ext
+                jc      __as_fail
+
+                ;Translate linear address to physical address for DMA
+                push    ebx
+                mov     eax, stg_addr[ebx*4]
+                mov     ecx, stg_size[ebx*4]
+                call    physaddr_translate
+                pop     ebx
+                jc      __as_ext_transl_fail
+
+                ;Save VDS lock handle (nonzero only for VDS method)
+                mov     stg_vds_lock[ebx*4], edx
+                ;EAX = physical address (from physaddr_translate)
+                clc
+                ret
+
+__as_ext_transl_fail:
+                ;Translation failed -- free the extended memory we just
+                ;allocated and fall through to try conventional memory
+                call    __free_ext
+
+__alloc_conv:   ;--- Conventional memory path (linear == physical) ---
+                call    __alloc_conv_int
+                jc      __as_fail
+
+                ;For conventional memory, linear address IS the physical
+                ;address (identity-mapped below 1 MB)
+                mov     eax, stg_addr[ebx*4]
+                clc
+                ret
+
+__as_fail:      stc
+                ret
+dpmi_alloc_staging ENDP
+
+;----------------------------------------------------------------------------
+; dpmi_free_staging -- Free a DMA-safe memory block
+;
+; Automatically determines whether the slot holds extended or conventional
+; memory (by checking if the address is below 1 MB) and calls the
+; appropriate free routine. Releases VDS locks if applicable.
+;
+; If the slot is not allocated (stg_addr[ebx*4] == 0), this is a no-op.
+;
+; Entry: EBX = slot index
+; Exit:  stg_addr[ebx*4] and stg_size[ebx*4] set to 0
+; Destroys: EAX, EDX
+;
+dpmi_free_staging PROC NEAR
+                cmp     stg_addr[ebx*4], 0
+                je      __fs_done
+
+                ;Release VDS lock if one is held for this slot
+                cmp     stg_vds_lock[ebx*4], 0
+                je      __fs_no_vds
+                push    ecx
+                mov     eax, stg_addr[ebx*4]
+                mov     ecx, stg_size[ebx*4]
+                mov     edx, stg_vds_lock[ebx*4]
+                call    physaddr_release_lock
+                pop     ecx
+                mov     stg_vds_lock[ebx*4], 0
+__fs_no_vds:
+
+                ;Determine allocation type: conventional memory is below
+                ;1 MB (100000h), extended memory is at or above 1 MB
+                cmp     stg_addr[ebx*4], 100000h
+                jb      __fs_conv
+
+                ;Extended memory -- unlock and free via DPMI 0502h
+                call    __free_ext
+                jmp     __fs_done
+
+__fs_conv:      ;Conventional memory -- free via DPMI 0101h
+                call    __free_conv_int
+                ;fall through
+
+__fs_done:      ret
+dpmi_free_staging ENDP
+
+;============================================================================
+; Internal routines -- not part of the public API
+;============================================================================
+
+;----------------------------------------------------------------------------
+; __alloc_ext -- Allocate an extended memory block via DPMI and lock it
 ;
 ; Entry: EBX = slot index, ECX = required size in bytes
 ; Exit:  CF clear on success (stg_addr/stg_size/stg_handle updated)
 ;        CF set on failure (slot unchanged)
 ; Destroys: EAX, ECX, EDX (other regs preserved via pushes)
 ;
-dpmi_alloc_staging PROC NEAR
-                push esi
-                push edi
-                push ebx
+__alloc_ext PROC NEAR
+                push    esi
+                push    edi
+                push    ebx
 
                 ;DPMI Allocate Memory Block (INT 31h AX=0501h)
                 ;BX:CX = size in bytes
@@ -55,7 +193,7 @@ dpmi_alloc_staging PROC NEAR
                                                 ;NOT EDI -- INT 31h returns the DPMI
                                                 ;handle in SI:DI and we must preserve DI)
                 pop     eax                     ;restore slot index into EAX
-                jc      __fail
+                jc      __ae_fail
 
                 ;BX:CX = linear address, SI:DI = DPMI memory handle
                 mov     stg_handle_hi[eax*2], si
@@ -87,28 +225,23 @@ dpmi_alloc_staging PROC NEAR
                 clc
                 ret
 
-__fail:         pop     ebx
+__ae_fail:      pop     ebx
                 pop     edi
                 pop     esi
                 stc
                 ret
-dpmi_alloc_staging ENDP
+__alloc_ext ENDP
 
 ;----------------------------------------------------------------------------
-; dpmi_free_staging -- Unlock and free a memory block via DPMI
+; __free_ext -- Unlock and free an extended memory block via DPMI
 ;
-; If the slot is not allocated (stg_addr[ebx*4] == 0), this is a no-op.
-;
-; Entry: EBX = slot index
+; Entry: EBX = slot index (stg_addr[ebx*4] must be nonzero)
 ; Exit:  stg_addr[ebx*4] and stg_size[ebx*4] set to 0
 ; Destroys: EAX
 ;
-dpmi_free_staging PROC NEAR
+__free_ext PROC NEAR
                 push    esi
                 push    edi
-
-                cmp     stg_addr[ebx*4], 0
-                je      __done
 
                 ;DPMI Unlock Linear Region (INT 31h AX=0601h)
                 ;BX:CX = linear address, SI:DI = size
@@ -139,24 +272,25 @@ dpmi_free_staging PROC NEAR
                 mov     stg_addr[ebx*4], 0
                 mov     stg_size[ebx*4], 0
 
-__done:         pop     edi
+                pop     edi
                 pop     esi
                 ret
-dpmi_free_staging ENDP
+__free_ext ENDP
 
 ;----------------------------------------------------------------------------
-; dpmi_alloc_conv -- Allocate a conventional memory block via DPMI
+; __alloc_conv_int -- Allocate a conventional memory block via DPMI
 ;
-; Conventional memory (below 1 MB) is identity-mapped under DOS/4GW:
-; linear address == physical address. This makes it suitable for DMA
-; buffers where the PCI bus master engine needs a physical address.
+; Conventional memory (below 1 MB) is identity-mapped: linear address ==
+; physical address. This makes it suitable for DMA buffers where the PCI
+; bus master engine needs a physical address and no translation method is
+; available.
 ;
 ; Entry: EBX = slot index, ECX = required size in bytes
 ; Exit:  CF clear on success (stg_addr/stg_size/stg_handle_lo updated)
 ;        CF set on failure (slot unchanged)
 ; Destroys: EAX, ECX, EDX (other regs preserved via pushes)
 ;
-dpmi_alloc_conv PROC NEAR
+__alloc_conv_int PROC NEAR
                 push    edi
                 push    ebx
 
@@ -172,7 +306,7 @@ dpmi_alloc_conv PROC NEAR
                 mov     ax, 0100h
                 int     31h
                 pop     ebx                     ;restore slot index
-                jc      __cfail
+                jc      __ac_fail
 
                 ;AX = real-mode segment, DX = protected-mode selector
                 mov     stg_handle_lo[ebx*2], dx ;save selector for freeing
@@ -186,25 +320,20 @@ dpmi_alloc_conv PROC NEAR
                 clc
                 ret
 
-__cfail:        pop     ebx
+__ac_fail:      pop     ebx
                 pop     edi
                 stc
                 ret
-dpmi_alloc_conv ENDP
+__alloc_conv_int ENDP
 
 ;----------------------------------------------------------------------------
-; dpmi_free_conv -- Free a conventional memory block via DPMI
+; __free_conv_int -- Free a conventional memory block via DPMI
 ;
-; If the slot is not allocated (stg_addr[ebx*4] == 0), this is a no-op.
-;
-; Entry: EBX = slot index
+; Entry: EBX = slot index (stg_addr[ebx*4] must be nonzero)
 ; Exit:  stg_addr[ebx*4] and stg_size[ebx*4] set to 0
 ; Destroys: EAX, EDX
 ;
-dpmi_free_conv PROC NEAR
-                cmp     stg_addr[ebx*4], 0
-                je      __cdone
-
+__free_conv_int PROC NEAR
                 ;DPMI Free DOS Memory Block (INT 31h AX=0101h)
                 ;DX = selector (from INT 31h AX=0100h)
                 mov     dx, stg_handle_lo[ebx*2]
@@ -213,8 +342,23 @@ dpmi_free_conv PROC NEAR
 
                 mov     stg_addr[ebx*4], 0
                 mov     stg_size[ebx*4], 0
+                ret
+__free_conv_int ENDP
 
-__cdone:        ret
-dpmi_free_conv ENDP
+;----------------------------------------------------------------------------
+; dpmi_shutdown -- Release internal resources
+;
+; Frees any internal state used by the physical address translation layer
+; (e.g. DPMI physical address mappings, VDS DDS conventional memory block).
+; Call this once at driver shutdown, after all staging buffers have been
+; freed via dpmi_free_staging.
+;
+; Entry: None
+; Exit:  None
+;
+dpmi_shutdown PROC NEAR
+                call    physaddr_shutdown
+                ret
+dpmi_shutdown ENDP
 
 ENDIF ; DPMI_ASM_INCLUDED

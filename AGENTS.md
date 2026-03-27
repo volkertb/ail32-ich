@@ -279,30 +279,44 @@ The `ich_src/` directory contains source files adapted from [ich2player](https:/
 | File | Purpose |
 |------|---------|
 | `dbgser.asm` | Serial port debug output (polled). Provides `dbg_char`, `dbg_hex8`/`16`/`32`, `dbg_str`, `dbg_crlf`, `dbg_label_hex16`/`32`. Reads COM port base from BDA. All code is conditional on `DEBUG_SERIAL` being defined. Include-guarded (`DBGSER_ASM_INCLUDED`). |
-| `dpmi.asm` | Generic DPMI memory allocation helpers: `dpmi_alloc_staging` (allocate + lock), `dpmi_free_staging` (unlock + free), `dpmi_alloc_conv` and `dpmi_free_conv` (conventional memory). Include-guarded (`DPMI_ASM_INCLUDED`). |
+| `dpmi.asm` | DMA-safe memory allocation with encapsulated physaddr translation. Includes `physaddr.asm` internally. Auto-detects translation method on first call; chooses extended memory (with physaddr translation) or conventional memory (identity-mapped, for `PHYSADDR_NONE` fallback). Public API: `dpmi_alloc_staging` (allocate + translate, returns physical address in EAX), `dpmi_free_staging` (release VDS locks + free), `dpmi_shutdown` (release physaddr internal resources). Include-guarded (`DPMI_ASM_INCLUDED`). |
 | `physaddr.asm` | Physical address translation for PCI bus master DMA. Multi-tier fallback: identity mapping probe, ring 0 page table walk, VDS (Virtual DMA Services), conventional memory. API: `physaddr_detect`, `physaddr_translate`, `physaddr_release_lock`, `physaddr_shutdown`. Conditionally includes `dbgser.asm` for debug output when `DEBUG_SERIAL` is defined. Include-guarded (`PHYSADDR_ASM_INCLUDED`). |
 | `to16s.asm` | PCM format conversion: `convert_to_16stereo` up-converts 8-bit unsigned or 16-bit signed (mono or stereo) to 16-bit signed stereo. Device-agnostic. Include-guarded (`TO16S_ASM_INCLUDED`). |
 
-These are reusable across AIL/32 drivers. The DPMI helpers operate on caller-defined per-slot arrays (`stg_addr`, `stg_size`, `stg_handle_hi`, `stg_handle_lo`). They are intentionally "dumb" -- they only perform the DPMI operations themselves. Safety decisions (e.g. "is DMA still reading from this buffer?") and free-and-reallocate sequencing belong in the caller (e.g. `register_sb` in the ICH driver).
+These are reusable across AIL/32 drivers. The DPMI helpers operate on caller-defined per-slot arrays (`stg_addr`, `stg_size`, `stg_handle_hi`, `stg_handle_lo`). The `dpmi.asm` module encapsulates all physaddr detection, translation, VDS lock management, and conventional memory fallback logic -- callers only need `dpmi_alloc_staging` / `dpmi_free_staging` / `dpmi_shutdown` and never interact with `physaddr.asm` directly. Safety decisions (e.g. "is DMA still reading from this buffer?") and free-and-reallocate sequencing belong in the caller (e.g. `register_sb` in the ICH driver).
 
 ## Physical vs Linear Addressing for DMA
 
 The AC'97 DMA engine is a PCI bus master -- it reads from **physical** (bus) memory addresses. DPMI applications work with linear (virtual) addresses. Under paging, linear != physical for extended memory. The BDL (Buffer Descriptor List) itself is allocated in conventional memory (below 1 MB) where linear == physical is guaranteed, but staging buffers use extended memory via DPMI INT 31h AX=0501h.
 
-The `physaddr.asm` module (`util/physaddr.asm`) handles the linear-to-physical translation with a multi-tier fallback strategy, detected once at `init_driver` time via `physaddr_detect`:
+The `physaddr.asm` module (`util/physaddr.asm`) handles the linear-to-physical translation with a multi-tier fallback strategy, auto-detected on the first `dpmi_alloc_staging` call via `physaddr_detect`:
 
 1. **Identity mapping probe** -- allocates a test block, writes a magic pattern, uses DPMI AX=0800h (Map Physical Address) to create a second mapping, and does two-way verification. Works when the DPMI host does not remap extended memory (common with DOS/4GW without EMM386). Cheapest method at lookup time (no-op).
 2. **Ring 0 page table walk** -- checks CPL from CS selector; if ring 0 (e.g. DOS/32A), reads CR3 and walks page directory/table entries to find the physical frame. Handles both 4 KB pages and 4 MB PSE pages. Caches the last page table mapping.
 3. **Virtual DMA Services (VDS)** -- checks BDA flag at 40:7Bh bit 5; if present (EMM386, QEMM, JEMMEX), calls INT 4Bh AX=8103h (Lock DMA Region) via DPMI real-mode interrupt simulation. Requires a 16-byte DDS in conventional memory. Returns a lock handle that must be released via `physaddr_release_lock` before freeing the buffer.
-4. **PHYSADDR_NONE** -- no translation available. The caller (`register_sb`) must fall back to conventional memory allocation where linear == physical is guaranteed.
+4. **PHYSADDR_NONE** -- no translation available. `dpmi_alloc_staging` automatically falls back to conventional memory allocation where linear == physical is guaranteed.
 
-**Current status:** In the QEMU test environment, VDS is selected (the identity and ring 0 probes both fail because DOS/4GW does not support DPMI AX=0800h for RAM addresses). Staging buffers in extended memory did not produce sound when linear addresses were used directly in BDL entries; the physaddr translation via VDS was required to get working audio. A conventional memory fallback for `PHYSADDR_NONE` (allocating staging buffers below 1 MB where identity mapping is guaranteed) is planned but not yet implemented.
+All physaddr detection, translation, VDS lock management, and the conventional memory fallback are encapsulated inside `dpmi.asm`. The driver code (`a32ichdg.asm`) calls only `dpmi_alloc_staging` (which returns the physical address in EAX), `dpmi_free_staging`, and `dpmi_shutdown` -- it never interacts with `physaddr.asm` directly.
+
+**Current status (tested 2026-03-27):** Three DOS environments tested in QEMU/KVM with FreeDOS + DOS/4GW:
+
+| Environment | physaddr method | linear == physical? | Audio (non-debug) | Audio (debug serial) |
+|---|---|---|---|---|
+| JEMM loaded | VDS (method 3) | No (paging active) | Works | Broken (static bursts) |
+| HIMEMX only (no JEMM) | Identity (method 1) | Yes | Works | Works |
+| Bare (no EMM, no HIMEM) | Identity (method 1) | Yes | Works | Works |
+
+The identity probe succeeds in both non-JEMM environments because DOS/4GW does not remap extended memory when no EMM is loaded. With JEMM, the identity probe fails (DPMI AX=0800h not supported for RAM addresses under JEMM's V86 DPMI host), the ring 0 probe fails (DOS/4GW runs at ring 3), and VDS is selected.
+
+The conventional memory fallback path (`PHYSADDR_NONE`) was not exercised in any of these environments -- identity or VDS was always available. This path compiles and links correctly but remains untested at runtime.
+
+**Debug serial + JEMM audio breakup:** With JEMM loaded, polled serial debug output in `serve_driver` (at 100 Hz) causes audio to break up into short bursts of static separated by silence. This does not happen without JEMM. The root cause is not individual port I/O trapping (VME/IOPB likely allows direct COM port access) but rather the cumulative overhead of V86-mode DPMI/interrupt dispatch layering: every INT 31h call, timer interrupt (INT 8), and VDS real-mode interrupt simulation routes through additional V86 mode transitions under JEMM. Combined with the inherent serial wire time (~87us per character at 115200 baud, so 50-100 characters of debug output per tick consumes 4-9ms of the 10ms timer budget), the total exceeds the real-time budget. Without JEMM, DOS/4GW runs natively in protected mode with no V86 transitions, so the same serial output fits within the timer budget. The fix is to throttle debug output in `serve_driver` (e.g. only emit on state changes, not every tick).
 
 The translation happens at staging buffer allocation time (typically twice per game session in `register_sb`), not on the DMA hot path. The physical addresses are stored in `stg_phys[]` and written into BDL entries by `serve_driver` and `start_d_pb`.
 
 ## Current Work in Progress
 
-**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, configures the codec, and detects the physical address translation method via `physaddr_detect`. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo, writing to DPMI-allocated extended memory staging buffers. Physical addresses for BDL entries are obtained via `physaddr_translate` at allocation time and stored in `stg_phys[]`. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 mixer register writes for volume/pan, software ADPCM decoder (nice-to-have), conventional memory fallback when `physaddr_detect` returns `PHYSADDR_NONE`.
+**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, and configures the codec. DMA-safe memory allocation, physical address translation, and conventional memory fallback are fully encapsulated in `dpmi.asm` -- the driver calls only `dpmi_alloc_staging` (returns physical address), `dpmi_free_staging`, and `dpmi_shutdown`. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Tested across three FreeDOS + DOS/4GW environments (JEMM, HIMEMX-only, bare) in QEMU/KVM -- audio plays correctly in all non-debug configurations. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 mixer register writes for volume/pan, software ADPCM decoder (nice-to-have).
 
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 
@@ -310,26 +324,31 @@ The translation happens at staging buffer allocation time (typically twice per g
 
 ## TODO
 
-### Conventional memory fallback for PHYSADDR_NONE
-
-Re-add `dpmi_alloc_conv` as a fallback in `register_sb` when `physaddr_detect` returns `PHYSADDR_NONE` (no translation method available). Conventional memory (below 1 MB) is identity-mapped regardless of DPMI host, so no translation is needed. This was the original allocation method before extended memory staging buffers were implemented.
-
 ### physaddr test matrix
 
-The physaddr module's multi-tier fallback needs testing across different DOS environments to verify each code path. The current test environment (FreeDOS + Jemm + DOS/4GW in QEMU) only exercises the VDS path.
+The physaddr module's multi-tier fallback needs testing across different DOS environments to verify each code path. Three of the eight planned environments have been tested (2026-03-27).
 
-**Environments to test:**
+**Test results:**
 
-- FreeDOS bare (no EMM, no HIMEM) + DOS/4GW -- tests PHYSADDR_NONE fallback (once implemented); no VDS, no paging
-- FreeDOS + HIMEMX (no EMM) + DOS/4GW -- XMS/A20 but no VDS or page remapping
-- FreeDOS + Jemm386 + DOS/4GW -- current baseline (VDS path)
-- FreeDOS + DOS/32A instead of DOS/4GW -- ring 0 page table walk (DOS/32A runs at ring 0); may also test identity probe if DOS/32A supports DPMI 0800h
-- FreeDOS + QEMM (if available) + DOS/4GW -- alternative VDS provider
-- Windows 95/98 DOS session -- DPMI host is Windows VMM; different paging/VDS behavior
-- Windows 95/98 DOS session + DOS/32A -- ring 0 may not be available under Windows VMM
-- Real hardware (if available) -- verify behavior outside emulation
+| Environment | Status | physaddr method | Audio | Notes |
+|---|---|---|---|---|
+| FreeDOS bare (no EMM, no HIMEM) + DOS/4GW | **Tested** | Identity (1) | Works | linear == physical; debug serial works too |
+| FreeDOS + HIMEMX (no EMM) + DOS/4GW | **Tested** | Identity (1) | Works | linear == physical; debug serial works too |
+| FreeDOS + JEMM + DOS/4GW | **Tested** | VDS (3) | Works | linear != physical; debug serial breaks audio (see below) |
+| FreeDOS + DOS/32A instead of DOS/4GW | Untested | Expected: Ring 0 (2) | -- | DOS/32A runs at ring 0; may also test identity probe |
+| FreeDOS + QEMM (if available) + DOS/4GW | Untested | Expected: VDS (3) | -- | Alternative VDS provider |
+| Windows 95/98 DOS session | Untested | Unknown | -- | DPMI host is Windows VMM; different paging/VDS behavior |
+| Windows 95/98 DOS session + DOS/32A | Untested | Unknown | -- | Ring 0 may not be available under Windows VMM |
+| Real hardware (if available) | Untested | Varies | -- | Verify behavior outside emulation |
 
-**What to verify in each environment:**
+**Key findings:**
+
+- The identity probe succeeds whenever no EMM is loaded, because DOS/4GW does not remap extended memory in that configuration. This covers the HIMEMX-only and bare cases.
+- With JEMM loaded, the identity probe fails (DPMI AX=0800h not supported for RAM addresses), the ring 0 probe fails (DOS/4GW runs at ring 3), and VDS is selected.
+- The `PHYSADDR_NONE` conventional memory fallback was not exercised in any tested environment -- identity or VDS was always available. It is implemented (inside `dpmi_alloc_staging`) and compiles correctly but remains untested at runtime.
+- Debug serial output at 100 Hz in `serve_driver` causes audio breakup only under JEMM. Root cause: V86-mode DPMI/interrupt dispatch overhead combined with serial wire time (~87us/char at 115200 baud) exceeds the 10ms timer budget. VME (Virtual Mode Extensions) does not help here -- VME optimizes software interrupt dispatch (INT n redirection), not I/O port trapping (governed by IOPB) or the general V86 mode transition overhead on DPMI calls and timer interrupts. Without JEMM, DOS/4GW runs natively in protected mode with no V86 transitions, so the same serial output fits within budget.
+
+**What to verify in remaining environments:**
 
 - Which physaddr tier is selected (enable DEBUG_SERIAL to check)
 - Whether physical addresses match linear addresses or differ
@@ -342,4 +361,4 @@ The physaddr module's multi-tier fallback needs testing across different DOS env
 - `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation
 - AC'97 mixer register writes for volume/pan
 - Software ADPCM decoder (nice-to-have)
-- Debug serial output throttling in `serve_driver` (polled serial I/O at 100 Hz is too slow for real-time playback)
+- Debug serial output throttling in `serve_driver` -- polled serial I/O at 100 Hz exceeds the timer budget under JEMM's V86 overhead; throttle to state-change-only output or reduce verbosity

@@ -101,6 +101,9 @@ $qemu_exec \
       -audiodev pipewire,id=audio0 \
       -device AC97,audiodev=audio0 &
 
+# Wait before launching the second one, so we know which one is first and which one is second.
+sleep 2
+
 #Another QEMU instance with read-only C: and without an audio device:
 # shellcheck disable=SC2086
 $qemu_exec \

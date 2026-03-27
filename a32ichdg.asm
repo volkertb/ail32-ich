@@ -1,3 +1,4 @@
+; SPDX-FileType: SOURCE
 ; SPDX-FileCopyrightText: Copyright (C) 1991-1993 Miles Design, Inc.
 ; SPDX-FileCopyrightText: Copyright (C) 2023 Volkert de Buisonjé
 ; SPDX-FileContributor: Volkert de Buisonjé
@@ -203,7 +204,6 @@ stg_handle_hi   dw 2 dup (0)            ;DPMI memory handle (SI from INT 31h/050
 stg_handle_lo   dw 2 dup (0)            ;DPMI memory handle (DI from INT 31h/0501h)
 stg_samples     dd 2 dup (0)            ;16-bit stereo sample count for BDL (= converted size / 2)
 stg_phys        dd 2 dup (0)            ;Physical address of each staging buffer (for BDL/DMA)
-stg_lock        dd 2 dup (0)            ;VDS lock handle per buffer (0 if not VDS)
 
                 ;
                 ;Buffer Descriptor List (BDL) -- 2 entries x 8 bytes = 16 bytes
@@ -274,7 +274,6 @@ dbg_s_done      db 'ALL_DONE',0
 dbg_s_adv_lvi   db 'ADV_LVI',0
 ENDIF ; DEBUG_SERIAL
 
-                INCLUDE util/physaddr.asm
                 INCLUDE util/to16s.asm
 
 ;----------------------------------------------------------------------------
@@ -529,17 +528,6 @@ IFDEF DEBUG_SERIAL
 ENDIF ; DEBUG_SERIAL
 
                 ;
-                ;Detect physical address translation method for staging
-                ;buffers. The PCI bus master DMA engine needs physical
-                ;addresses in BDL entries; physaddr_detect probes for
-                ;identity mapping, ring 0 page table walk, or VDS.
-                ;If no method is found (PHYSADDR_NONE), register_sb
-                ;falls back to conventional memory allocation.
-                ;
-
-                call    physaddr_detect
-
-                ;
                 ;Initialize playback state
                 ;
 
@@ -580,24 +568,15 @@ shutdown_driver PROC USES ebx esi edi,\
                 mov     al, RR
                 out     dx, al
 
-                ;Release VDS locks on staging buffers (no-op if not VDS)
-                mov     eax, stg_addr[0*4]
-                mov     ecx, stg_size[0*4]
-                mov     edx, stg_lock[0*4]
-                call    physaddr_release_lock
-                mov     eax, stg_addr[1*4]
-                mov     ecx, stg_size[1*4]
-                mov     edx, stg_lock[1*4]
-                call    physaddr_release_lock
-
-                ;Free staging buffers (extended memory)
+                ;Free staging buffers (handles VDS lock release and
+                ;conventional vs extended memory internally)
                 mov     ebx, 0
                 call    dpmi_free_staging
                 mov     ebx, 1
                 call    dpmi_free_staging
 
-                ;Free physaddr internal resources
-                call    physaddr_shutdown
+                ;Free physaddr internal resources (DPMI mappings, VDS DDS block)
+                call    dpmi_shutdown
 
                 ;Free BDL conventional memory block
                 cmp     bdl_phys, 0
@@ -979,13 +958,7 @@ __stg_alloc:
                 cmp     stg_addr[ebx*4], 0
                 je      __stg_do_alloc
 
-                ;Release VDS lock before freeing (no-op if not VDS)
-                mov     eax, stg_addr[ebx*4]
-                mov     ecx, stg_size[ebx*4]
-                mov     edx, stg_lock[ebx*4]
-                call    physaddr_release_lock
                 mov     stg_phys[edi*4], 0
-                mov     stg_lock[edi*4], 0
 
                 mov     ebx, edi
                 call    dpmi_free_staging
@@ -994,22 +967,19 @@ __stg_do_alloc: mov     ebx, edi
                 call    dpmi_alloc_staging      ;EBX=index, ECX=size
                 jc      __fail
 
+                ;Store physical address (from EAX) returned by
+                ;dpmi_alloc_staging before convert_to_16stereo destroys it.
+                ;Only needed on fresh allocation; re-registrations reuse
+                ;the existing stg_phys value (buffer address hasn't changed).
+                mov     stg_phys[edi*4], eax
+
 __stg_ok:
                 ;Convert PCM data into staging buffer
-                ;(convert_to_16stereo destroys EDI -- save buffer index)
+                ;(convert_to_16stereo destroys EAX, ECX, EDX, ESI, EDI)
                 push    edi
                 mov     ebx, edi
                 call    convert_to_16stereo
                 pop     edi
-
-                ;Translate staging buffer linear address to physical address
-                ;for PCI bus master DMA. The BDL entries need physical addresses.
-                mov     eax, stg_addr[edi*4]
-                mov     ecx, stg_size[edi*4]
-                call    physaddr_translate
-                jc      __fail
-                mov     stg_phys[edi*4], eax
-                mov     stg_lock[edi*4], edx
 
                 ;Mark buffer as ready to play. Do NOT write BDL entries here --
                 ;serve_driver's RESTART and ADV_LVI paths copy stg_phys/stg_samples
