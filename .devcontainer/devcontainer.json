@@ -8,10 +8,16 @@
   // If no explicit USER is specified in the Dockerfile (which is recommended), this value should be set to "root".
   "containerUser": "dev-container-user",
 
-  // Needed for Podman to have proper file permissions for non-root container users, at least in JetBrains CLion
-  // (Visual Studio Code apparently handles this automatically)
-  // See also https://youtrack.jetbrains.com/projects/IJPL/issues/IJPL-67102/Devcontainer-clone-sources-option-mounted-as-root-user-inside-the-container
-  "runArgs": ["--userns=keep-id"],
+  "runArgs": [
+
+    // Needed for Podman to have proper file permissions for non-root container users, at least in JetBrains CLion
+    // (Visual Studio Code apparently handles this automatically)
+    // See also https://youtrack.jetbrains.com/projects/IJPL/issues/IJPL-67102/Devcontainer-clone-sources-option-mounted-as-root-user-inside-the-container
+    "--userns=keep-id",
+
+    // Allows the dev container to access ports on the host machine on domain host.docker.internal
+    "--add-host=host.docker.internal:host-gateway"
+  ],
 
   "mounts": [
     "source=${localWorkspaceFolder}/.devcontainer/.claude-home,target=/home/dev-container-user/.claude,type=bind",

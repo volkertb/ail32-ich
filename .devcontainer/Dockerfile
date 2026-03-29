@@ -29,7 +29,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt -y update \
-    && apt -y install nasm xxd python3
+    && apt -y install nasm xxd python3 python3-pip python3-venv
 
 # Switch from root to the default user. See https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 USER $USERNAME
@@ -37,6 +37,14 @@ USER $USERNAME
 # Make the (current) non-root user's home directory the default work directory for this container image.
 WORKDIR /home/$USERNAME
 
+ENV VIRTUAL_ENV=/home/$USERNAME/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="/home/$USERNAME/.local/bin:$VIRTUAL_ENV/bin:${PATH}"
+RUN pip install --upgrade pip
+
 # Uncomment the following if you want the Claude CLI tool in the terminal as soon the dev container starts up
-ENV PATH="/home/$USERNAME/.local/bin:${PATH}"
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Uncomment the following if you want the Aider CLI tool in the terminal as soon the dev container starts up
+RUN pip install aider-install
+RUN aider-install

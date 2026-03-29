@@ -5,3 +5,4 @@
 *.exe
 bld_info.inc
 .idea
+.aider*
