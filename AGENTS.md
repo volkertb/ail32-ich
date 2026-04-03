@@ -232,6 +232,21 @@ The ICH driver uses `service_rate = 100` (100 Hz polling via `serve_driver`). Wh
 
 This avoids PCI IRQ complexity (PIC routing, shared interrupts, protected-mode IDT setup). The ~10ms polling latency only affects buffer recycling detection, not playback smoothness -- the DMA engine plays continuously from the BDL regardless of polling.
 
+### Volume control (set_d_pb_vol / apply_volume)
+
+The AIL volume range is 0-127 (`main_volume`). The AC'97 codec uses per-channel attenuation registers where 0 = maximum volume and higher values = quieter. Two registers control output level:
+
+- **`CODEC_MASTER_VOL_REG` (02h)** -- overall analog output level. Set to 0x0000 (max, 0 dB attenuation) during `init_driver` so that `CODEC_PCM_OUT_REG` has full dynamic range.
+- **`CODEC_PCM_OUT_REG` (18h)** -- PCM DAC output level. Dynamically controlled by `apply_volume` based on `main_volume`.
+
+**5-bit attenuation constraint:** AC'97 codecs implement either 5-bit (0-31) or 6-bit (0-63) attenuation per channel. Writing a 6-bit value to a 5-bit codec does **not** harmlessly ignore the extra bit -- the codec reads only the low 5 bits, causing values 32-63 to wrap around to 0-31. For example, attenuation 32 (0b100000) is seen as 0 (max volume) by a 5-bit codec, causing a sudden volume jump at the midpoint of the AIL range. The `apply_volume` procedure uses `shr 2` (not `shr 1`) to produce 0-31 (5-bit safe) attenuation values. This costs half the granularity (32 steps instead of 64) but each step is ~1.5 dB, giving ~46.5 dB of dynamic range -- more than sufficient.
+
+The conversion: `attenuation = (127 - volume) >> 2`. Volume 0 sets BIT15 (mute). Both L and R channels get the same attenuation (no panning yet). No delays are needed after volume writes -- unlike cold-reset codec init, volume changes take effect within one AC'97 frame (~20us).
+
+Volume changes work while paused -- `apply_volume` writes to the codec mixer register directly, independent of DMA state.
+
+**Not reusable across drivers:** The volume conversion is AC'97-specific. The attenuation register format (5-bit per channel, BIT15 mute, L/R packed in one 16-bit word) and I/O port access via NAMBAR are specific to AC'97 codecs. Other PCI sound hardware (Intel HDA, EMU10K1, ES137x) uses completely different volume control mechanisms. Each driver needs its own AIL 0-127 to hardware mapping.
+
 ### BDL (Buffer Descriptor List) design for AIL/32
 
 AIL/32's digital API exposes exactly 2 buffer slots (0 and 1). The ICH DMA engine supports 32 BDL entries. We tile both buffers across all 32 entries: even entries (0, 2, ..., 30) carry buffer 0, odd entries (1, 3, ..., 31) carry buffer 1. Buffer index = `entry AND 1`.
@@ -322,7 +337,7 @@ The translation happens at staging buffer allocation time (typically twice per g
 
 ## Current Work in Progress
 
-**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, and configures the codec. DMA-safe memory allocation, physical address translation, and conventional memory fallback are fully encapsulated in `dpmi.asm` -- the driver calls only `dpmi_alloc_staging` (returns physical address), `dpmi_free_staging`, and `dpmi_shutdown`. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Tested across three FreeDOS + DOS/4GW environments (JEMM, HIMEMX-only, bare) in QEMU/KVM -- audio plays correctly in all non-debug configurations. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 mixer register writes for volume/pan, software ADPCM decoder (nice-to-have).
+**`a32ichdg.dll`** -- Digital sound driver for Intel ICHx AC'97 and compatible devices. Core playback pipeline is implemented: `detect_device`, `init_driver`, `serve_driver`, `shutdown_driver`, and all playback API functions (`register_sb`, `start_d_pb`, `stop_d_pb`, `pause_d_pb`, `cont_d_pb`, `get_sb_status`, `get_VOC_status`, volume/pan get/set, `format_sb`, `format_VOC_file`). Detection scans for all supported ICH/SiS AC'97 variants via direct PCI Config Mechanism #1 port I/O. Initialization reads NAMBAR/NABMBAR from PCI BARs, enables I/O and bus master access, cold-resets the AC'97 link, enables Variable Rate Audio, sets master volume to max (0 dB), and applies the initial AIL volume to the PCM Out register. Volume control is fully functional via `apply_volume` (writes `CODEC_PCM_OUT_REG`), including while paused. DMA-safe memory allocation, physical address translation, and conventional memory fallback are fully encapsulated in `dpmi.asm` -- the driver calls only `dpmi_alloc_staging` (returns physical address), `dpmi_free_staging`, and `dpmi_shutdown`. Format conversion (`convert_to_16stereo`) handles 8-bit unsigned and 16-bit signed, mono and stereo. Sample rate conversion from SB time constants to Hz is cached to avoid redundant codec writes. Tested across three FreeDOS + DOS/4GW environments (JEMM, HIMEMX-only, bare) in QEMU/KVM -- audio plays correctly in all non-debug configurations. Remaining TODOs: `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation, AC'97 pan via `apply_volume` (L/R split from `panpot_val`), software ADPCM decoder (nice-to-have).
 
 **`a32ossdg.dll`** — Experimental "OSS bridge" sound driver — the goal is to bridge AIL/32 digital audio to Linux OSS. It links with `testlib.c`, which contains test/debug code (`whatever`, `write_string`) used to verify that calling C functions from assembly works correctly, including parameter passing.
 
@@ -365,6 +380,6 @@ The physaddr module's multi-tier fallback needs testing across different DOS env
 ### Other TODOs
 
 - `AIL_P_VOC_FILE` / `AIL_INDEX_VOC_BLK` implementation
-- AC'97 mixer register writes for volume/pan
+- AC'97 pan control via `apply_volume` (split L/R attenuation from `main_volume` and `panpot_val`)
 - Software ADPCM decoder (nice-to-have)
 - Debug serial output throttling in `serve_driver` -- polled serial I/O at 100 Hz exceeds the timer budget under JEMM's V86 overhead; throttle to state-change-only output or reduce verbosity

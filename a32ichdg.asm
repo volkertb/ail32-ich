@@ -553,6 +553,16 @@ ENDIF ; DEBUG_SERIAL
                 mov     panpot_val, 64          ;center
                 mov     last_civ, -1
 
+                ;Set master volume to maximum (0 dB attenuation) so the PCM
+                ;Out register has full dynamic range for AIL volume control
+                mov     dx, NAMBAR
+                add     dx, CODEC_MASTER_VOL_REG
+                xor     ax, ax                  ;0x0000 = no attenuation
+                out     dx, ax
+
+                ;Apply initial AIL volume to PCM Out register
+                call    apply_volume
+
                 POP_F
                 mov     eax, 1                  ;return nonzero = success
                 ret
@@ -1405,6 +1415,57 @@ get_VOC_status  PROC USES ebx esi edi
 get_VOC_status  ENDP
 
 ;****************************************************************************
+;
+; apply_volume -- Write AIL volume to AC'97 PCM Out Volume register
+;
+; Converts main_volume (AIL range 0-127) to AC'97 6-bit attenuation
+; and writes CODEC_PCM_OUT_REG (18h). Both channels get the same
+; attenuation (no panning). When set_d_pb_pan is implemented, this
+; procedure will compute separate L/R values from main_volume and
+; panpot_val.
+;
+; Register format: bits 13:8 = left attenuation, bits 5:0 = right
+; attenuation. Each step is ~1.5 dB. 0 = max volume, 63 = min.
+; BIT15 = mute.
+;
+; Entry: None (reads main_volume global)
+; Exit:  All registers preserved except flags.
+;
+apply_volume    PROC NEAR
+                push    eax
+                push    ecx
+                push    edx
+
+                mov     eax, main_volume
+                test    eax, eax
+                jz      __av_mute
+
+                ; attenuation = (127 - volume) >> 2, giving 0-31 range
+                ; (5-bit safe: all AC'97 codecs support at least 5-bit
+                ; attenuation per channel; 6-bit codecs exist but are
+                ; not universal, and writing bit 5 on a 5-bit codec
+                ; causes the value to wrap around)
+                mov     ecx, 127
+                sub     ecx, eax
+                shr     ecx, 2                  ;ECX = attenuation 0-31
+                mov     eax, ecx
+                shl     eax, 8
+                or      eax, ecx                ;AX = (atten << 8) | atten
+                jmp     __av_write
+
+__av_mute:      mov     eax, 8000h              ;BIT15 = mute
+
+__av_write:     mov     dx, NAMBAR
+                add     dx, CODEC_PCM_OUT_REG
+                out     dx, ax
+
+                pop     edx
+                pop     ecx
+                pop     eax
+                ret
+apply_volume    ENDP
+
+;****************************************************************************
 set_d_pb_vol    PROC USES ebx esi edi,\
                 H,Vol
 
@@ -1414,7 +1475,7 @@ set_d_pb_vol    PROC USES ebx esi edi,\
                 mov     eax, [Vol]
                 mov     main_volume, eax
 
-                ; TODO: apply volume to AC'97 mixer registers
+                call    apply_volume
 
                 POP_F
                 ret
@@ -1442,7 +1503,9 @@ set_d_pb_pan    PROC USES ebx esi edi,\
                 mov     eax, [Pan]
                 mov     panpot_val, eax
 
-                ; TODO: apply pan to AC'97 mixer registers
+                ; TODO: when panning is implemented, call apply_volume here
+                ; (apply_volume will compute separate L/R attenuation from
+                ; main_volume and panpot_val)
 
                 POP_F
                 ret
