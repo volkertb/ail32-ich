@@ -234,15 +234,21 @@ This avoids PCI IRQ complexity (PIC routing, shared interrupts, protected-mode I
 
 ### BDL (Buffer Descriptor List) design for AIL/32
 
-AIL/32's digital API exposes exactly 2 buffer slots (0 and 1). The ICH DMA engine supports 32 BDL entries but we only need 2: entry 0 for buffer 0, entry 1 for buffer 1. The DMA engine uses LVI (Last Valid Index) to know when to stop -- entries beyond LVI are never reached, so no zero-padding of unused entries is needed.
+AIL/32's digital API exposes exactly 2 buffer slots (0 and 1). The ICH DMA engine supports 32 BDL entries. We tile both buffers across all 32 entries: even entries (0, 2, ..., 30) carry buffer 0, odd entries (1, 3, ..., 31) carry buffer 1. Buffer index = `entry AND 1`.
+
+LVI (Last Valid Index) is kept one step behind CIV: `LVI = (CIV + 31) AND 1Fh`. This ensures CIV != LVI during normal playback, so the ring never halts on its own. Pause/resume becomes a simple RPBM toggle -- no PICB checks, no CIV reconciliation, no risk of CIV walking past LVI through garbage entries.
+
+Each buffer version plays exactly once. When `serve_driver` detects a parity change in CIV (CIV moved from an even entry to odd, or vice versa), it marks the previous buffer as `DAC_DONE`. The app re-registers with fresh data, and `serve_driver`'s STOPPED->PLAYING transition tiles the new data into all 16 same-parity entries before the ring reaches them (~200ms lead time at 100 Hz polling).
 
 Playback flow:
 1. App registers buffer 0 and buffer 1, calls `start_d_pb`
-2. Driver populates BDL entries 0 and 1, sets LVI=1, starts DMA (RPBM bit)
-3. DMA plays entry 0, advances CIV to 1
-4. `serve_driver` (polled at 100 Hz) detects CIV transition, marks `buff_status[0] = DAC_DONE`
-5. App sees buffer 0 done, refills it, re-registers -> driver updates BDL entry 0, advances LVI to wrap to 0
-6. Cycle continues in ping-pong fashion
+2. Driver tiles both buffers across all 32 BDL entries (even=buf0, odd=buf1), sets LVI=31, starts DMA (RPBM bit)
+3. DMA plays through entries 0, 1, 2, 3, ... CIV advances continuously
+4. `serve_driver` (polled at 100 Hz) detects CIV parity change, marks the previous buffer as `DAC_DONE`, keeps LVI one step behind CIV
+5. App sees buffer done, refills it, re-registers -> `serve_driver` tiles fresh data into all 16 same-parity entries on next poll
+6. Cycle continues as a continuous ring
+
+Single-buffer start: if only one buffer is registered at `start_d_pb` time, entry 0 is populated with LVI=0. DMA plays and halts (DCH). When the second buffer arrives, `serve_driver` detects DCH + both buffers PLAYING (after tiling), does RR + restart in full ring mode.
 
 ### Reference source files
 

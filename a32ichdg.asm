@@ -178,7 +178,6 @@ DAC_status      dd ?                    ;Overall playback state (DAC_STOPPED/PAU
 buffer_mode     dd ?                    ;VOC_MODE or BUF_MODE
 current_buffer  dd ?                    ;Index (0 or 1) of buffer currently being played by DMA
 last_civ        dd -1                   ;Previous CIV value seen by serve_driver (-1 = none)
-bdl_slot        dd 2 dup (-1)           ;Maps BDL entry index (0 or 1) to buffer slot (0 or 1)
 
 buff_status     dd 2 dup (?)            ;Per-buffer status (DAC_STOPPED/PLAYING/DONE)
 buff_len        dd 2 dup (?)            ;Per-buffer length in bytes (original)
@@ -206,11 +205,16 @@ stg_samples     dd 2 dup (0)            ;16-bit stereo sample count for BDL (= c
 stg_phys        dd 2 dup (0)            ;Physical address of each staging buffer (for BDL/DMA)
 
                 ;
-                ;Buffer Descriptor List (BDL) -- 2 entries x 8 bytes = 16 bytes
+                ;Buffer Descriptor List (BDL) -- 32 entries x 8 bytes = 256 bytes
                 ;Allocated in conventional memory (below 1 MB) by init_driver,
                 ;because the PCI bus master DMA engine needs physical addresses
                 ;and conventional memory is identity-mapped (linear == physical)
                 ;under DOS/4GW.
+                ;
+                ;The 32 entries are tiled: even entries (0,2,...,30) carry buffer 0,
+                ;odd entries (1,3,...,31) carry buffer 1. LVI is kept one step behind
+                ;CIV so the ring never halts during normal playback, making
+                ;pause/resume a simple RPBM toggle.
                 ;
 
 bdl_phys        dd 0                    ;Physical (= linear) address of BDL in conventional memory
@@ -264,14 +268,20 @@ dbg_s_stgsamp   db 'stg_samp: ',0
 dbg_s_stgsize   db 'stg_size: ',0
 dbg_s_buflen    db 'buf_len: ',0
 dbg_s_pack      db 'pack: ',0
-dbg_s_start     db '--- start_d_pb',13,10,0
-dbg_s_serve_sr  db 'SR: ',0
-dbg_s_serve_civ db ' CIV: ',0
+dbg_s_start     db '--- start_d_pb',0
+dbg_s_pause     db '--- pause CIV:',0
+dbg_s_resume    db '--- resume CIV:',0
+dbg_s_serve_sr  db 'SR:',0
+dbg_s_serve_civ db ' CIV:',0
 dbg_s_serve_act db ' -> ',0
-dbg_s_halted    db 'HALTED',0
-dbg_s_restart   db 'RESTART',0
 dbg_s_done      db 'ALL_DONE',0
-dbg_s_adv_lvi   db 'ADV_LVI',0
+dbg_s_tile      db 'TILE',0
+dbg_s_ring_up   db 'RING_UP',0
+dbg_s_b0        db ' b0:',0
+dbg_s_b1        db ' b1:',0
+dbg_s_ds        db ' ds:',0
+dbg_s_str_nobu  db '--- start NOBUF',0
+dbg_s_lvi       db ' LVI:',0
 ENDIF ; DEBUG_SERIAL
 
                 INCLUDE util/to16s.asm
@@ -469,10 +479,10 @@ init_driver     PROC USES ebx esi edi,\
                 ;Allocate the Buffer Descriptor List (BDL) in conventional
                 ;memory (below 1 MB) where linear == physical, so the PCI
                 ;bus master DMA engine sees the correct physical address.
-                ;2 entries x 8 bytes = 16 bytes = 1 paragraph.
+                ;32 entries x 8 bytes = 256 bytes = 16 paragraphs.
                 ;
 
-                mov     ebx, 1                  ;BX = 1 paragraph (16 bytes)
+                mov     ebx, 16                 ;BX = 16 paragraphs (256 bytes)
                 mov     ax, 0100h               ;DPMI Allocate DOS Memory Block
                 int     31h
                 jc      __init_fail
@@ -482,11 +492,15 @@ init_driver     PROC USES ebx esi edi,\
                 shl     eax, 4                  ;linear addr = segment * 16
                 mov     bdl_phys, eax
 
-                ;Zero out the 16-byte BDL (2 entries x 8 bytes)
-                mov     DWORD PTR [eax], 0
-                mov     DWORD PTR [eax+4], 0
-                mov     DWORD PTR [eax+8], 0
-                mov     DWORD PTR [eax+12], 0
+                ;Zero out the 256-byte BDL (32 entries x 8 bytes)
+                push    edi
+                cld                             ;ensure forward direction for REP STOSD
+                mov     edi, eax                ;EDI = BDL linear address
+                xor     eax, eax
+                mov     ecx, 64                 ;256 bytes / 4 bytes per DWORD
+                rep     stosd
+                mov     eax, bdl_phys           ;restore EAX for BDBAR write
+                pop     edi
 
                 ;Point BDL Base Address Register (BDBAR) at the BDL
                 mov     dx, NABMBAR
@@ -610,8 +624,8 @@ serve_driver    PROC USES ebx esi edi
                 in      ax, dx                  ;AX = status word (DCH, CELV, LVBCI, etc.)
                 mov     ebx, eax                ;save status in EBX for later
 
-                ;Read Current Index Value (CIV) -- which BDL entry the DMA
-                ;engine is currently processing (0 or 1 in our 2-entry BDL)
+                ;Read Current Index Value (CIV) -- which BDL entry (0-31)
+                ;the DMA engine is currently processing
                 mov     dx, NABMBAR
                 add     dx, PO_CIV_REG
                 in      al, dx
@@ -641,47 +655,112 @@ IFDEF DEBUG_SERIAL
                 pop     eax
 ENDIF ; DEBUG_SERIAL
 
-                ;--- Track CIV transitions to detect buffer completions ---
-                cmp     eax, last_civ
-                je      __no_civ_change
+                ;--- Transition re-registered buffers: STOPPED -> PLAYING ---
+                ;
+                ;When the application re-registers a buffer (register_sb sets
+                ;DAC_STOPPED), we populate all 16 same-parity BDL entries here
+                ;before CIV tracking, so a just-registered buffer is not
+                ;immediately marked DONE for a stale CIV entry.
 
-                mov     ecx, last_civ
-                mov     last_civ, eax
+                ;Check buffer 0 (even entries: 0, 2, 4, ..., 30)
+                cmp     buff_status[0*4], DAC_STOPPED
+                jne     __tile_chk1
 
-                cmp     ecx, -1                 ;first poll after start?
-                je      __no_civ_change         ;yes, just record CIV
+                ;Program sample rate for buffer 0
+                push    eax
+                mov     ecx, 0
+                mov     eax, buff_sample[0*4]
+                call    set_sample_rate_hz
+                pop     eax
 
-                ;CIV advanced -- the previous buffer has finished playing.
-                ;Map the BDL entry index to the actual buffer slot, since
-                ;RESTART may place any slot into BDL entry 0.
-                mov     ecx, bdl_slot[ecx*4]
-                mov     buff_status[ecx*4], DAC_DONE
+                ;Tile buffer 0 across all 16 even BDL entries
+                push    eax
+                push    ecx
+                mov     edx, bdl_phys           ;EDX = base of BDL
+                mov     esi, stg_phys[0*4]      ;ESI = physical address
+                mov     edi, stg_samples[0*4]   ;EDI = sample count
+                mov     ecx, 16
+__tile_b0:      mov     DWORD PTR [edx], esi    ;BDL entry: buffer address
+                mov     DWORD PTR [edx+4], edi  ;BDL entry: sample count
+                add     edx, 16                 ;skip 2 entries (16 bytes)
+                dec     ecx
+                jnz     __tile_b0
+                pop     ecx
+                pop     eax
 
-__no_civ_change:
+                mov     buff_status[0*4], DAC_PLAYING
+
+IFDEF DEBUG_SERIAL
+                push    eax
+                push    esi
+                mov     esi, OFFSET dbg_s_serve_act
+                call    dbg_str
+                mov     esi, OFFSET dbg_s_tile
+                call    dbg_str
+                mov     esi, OFFSET dbg_s_b0
+                call    dbg_str
+                call    dbg_crlf
+                pop     esi
+                pop     eax
+ENDIF ; DEBUG_SERIAL
+
+__tile_chk1:
+                ;Check buffer 1 (odd entries: 1, 3, 5, ..., 31)
+                cmp     buff_status[1*4], DAC_STOPPED
+                jne     __tile_done
+
+                ;Program sample rate for buffer 1
+                push    eax
+                mov     ecx, 1
+                mov     eax, buff_sample[1*4]
+                call    set_sample_rate_hz
+                pop     eax
+
+                ;Tile buffer 1 across all 16 odd BDL entries
+                push    eax
+                push    ecx
+                mov     edx, bdl_phys
+                add     edx, 8                  ;start at entry 1 (offset 8)
+                mov     esi, stg_phys[1*4]      ;ESI = physical address
+                mov     edi, stg_samples[1*4]   ;EDI = sample count
+                mov     ecx, 16
+__tile_b1:      mov     DWORD PTR [edx], esi    ;BDL entry: buffer address
+                mov     DWORD PTR [edx+4], edi  ;BDL entry: sample count
+                add     edx, 16                 ;skip 2 entries (16 bytes)
+                dec     ecx
+                jnz     __tile_b1
+                pop     ecx
+                pop     eax
+
+                mov     buff_status[1*4], DAC_PLAYING
+
+IFDEF DEBUG_SERIAL
+                push    eax
+                push    esi
+                mov     esi, OFFSET dbg_s_serve_act
+                call    dbg_str
+                mov     esi, OFFSET dbg_s_tile
+                call    dbg_str
+                mov     esi, OFFSET dbg_s_b1
+                call    dbg_str
+                call    dbg_crlf
+                pop     esi
+                pop     eax
+ENDIF ; DEBUG_SERIAL
+
+__tile_done:
 
                 ;--- Check DCH (DMA Controller Halted) bit in status ---
-                ;The DMA engine halts after finishing the Last Valid Index (LVI)
-                ;entry. When halted, CIV stays at LVI and does not advance, so
-                ;CIV tracking alone cannot detect the final buffer's completion.
+                ;
+                ;DCH can occur in two situations:
+                ;1. Single-buffer start: start_d_pb started with one buffer
+                ;   (LVI=0), DMA played entry 0 and halted. If the other
+                ;   buffer has since been registered (STOPPED->PLAYING tiling
+                ;   above), we transition to full 32-entry ring mode.
+                ;2. Both buffers exhausted: no re-registration happened,
+                ;   playback is complete.
                 test    ebx, DCH
                 jz      __dma_running
-
-                ;DMA has halted -- mark played BDL entries as done, but ONLY
-                ;if they are still DAC_PLAYING. The application may have
-                ;already re-registered a buffer (DAC_STOPPED) after a CIV
-                ;transition told it the buffer was done. Clobbering
-                ;DAC_STOPPED back to DAC_DONE would lose that new data.
-                mov     ecx, bdl_slot[0*4]
-                cmp     buff_status[ecx*4], DAC_PLAYING
-                jne     __dch_check1
-                mov     buff_status[ecx*4], DAC_DONE
-__dch_check1:   test    eax, eax                ;EAX = CIV; if >0, entry 1 also played
-                jz      __dch_clear_sr
-                mov     ecx, bdl_slot[1*4]
-                cmp     buff_status[ecx*4], DAC_PLAYING
-                jne     __dch_clear_sr
-                mov     buff_status[ecx*4], DAC_DONE
-__dch_clear_sr:
 
                 ;Clear W1TC (Write-1-To-Clear) status bits so we can restart
                 ;cleanly without stale LVBCI/BCIS/FIFO_ERR from the previous run
@@ -690,108 +769,70 @@ __dch_clear_sr:
                 mov     ax, LVBCI or BCIS or FIFO_ERR
                 out     dx, ax
 
-                ;Check if the other buffer has been re-registered (DAC_STOPPED)
-                ;by the application while DMA was finishing the current one.
-                ;Map last_civ (BDL entry index) through bdl_slot to get the
-                ;buffer slot that just played, then XOR to get the other slot.
-                mov     ecx, last_civ
-                mov     ecx, bdl_slot[ecx*4]
-                xor     ecx, 1                  ;other buffer slot
-                cmp     buff_status[ecx*4], DAC_STOPPED
-                jne     __all_done
+                ;Check if both buffers are now PLAYING (tiled above from
+                ;STOPPED). If so, do RR + restart in full 32-entry ring mode.
+                cmp     buff_status[0*4], DAC_PLAYING
+                jne     __dch_partial
+                cmp     buff_status[1*4], DAC_PLAYING
+                jne     __dch_partial
 
-                ;Other buffer is ready -- program sample rate and restart DMA.
-                ;CIV is read-only and can only be reset via RR (Reset Registers).
-                ;Without a reset, setting LVI to an entry "behind" CIV would make
-                ;the DMA engine wrap through all 32 BDL entries (2-31 are garbage).
-                ;Fix: reset DMA so CIV=0, copy ready buffer into BDL entry 0, and
-                ;always restart from entry 0 regardless of which buffer slot it is.
-                mov     eax, buff_sample[ecx*4]
-                call    set_sample_rate_hz
-
-                mov     buff_status[ecx*4], DAC_PLAYING
-
-                ;Reset DMA engine so CIV returns to 0.
-                ;RR clears all bus master registers including BDBAR,
-                ;so we must re-write it before starting playback.
+                ;Both buffers are PLAYING -- transition to ring mode.
+                ;Reset DMA so CIV=0, re-write BDBAR (RR clears it),
+                ;set LVI=31 for full ring, and start.
                 mov     dx, NABMBAR
                 add     dx, PO_CR_REG
                 mov     al, RR
                 out     dx, al
 
-                ;Re-write BDL Base Address Register (cleared by RR)
                 mov     eax, bdl_phys
                 mov     dx, NABMBAR
                 add     dx, PO_BDBAR_REG
                 out     dx, eax
 
-                ;Copy the ready buffer's staging data into BDL entry 0
-                ;and record slot-to-BDL mapping for serve_driver
-                mov     bdl_slot[0*4], ecx
-                mov     edx, bdl_phys
-                mov     eax, stg_phys[ecx*4]
-                mov     DWORD PTR [edx], eax
-                mov     eax, stg_samples[ecx*4]
-                mov     DWORD PTR [edx+4], eax
-
-                ;Set LVI=0 (play only this one entry, then halt)
                 mov     dx, NABMBAR
                 add     dx, PO_LVI_REG
-                mov     al, 0
+                mov     al, 31
                 out     dx, al
 
-                ;Reset CIV tracking for the new run
                 mov     last_civ, -1
 
 IFDEF DEBUG_SERIAL
-                ;Log that the DMA engine is being restarted after halting,
-                ;because the other buffer was re-registered while DMA was
-                ;finishing the current one (seamless ping-pong continuation)
                 push    eax
                 push    esi
                 mov     esi, OFFSET dbg_s_serve_act
                 call    dbg_str
-                mov     esi, OFFSET dbg_s_restart
+                mov     esi, OFFSET dbg_s_ring_up
                 call    dbg_str
                 call    dbg_crlf
                 pop     esi
                 pop     eax
 ENDIF ; DEBUG_SERIAL
 
-                ;Restart DMA by setting RPBM (Run/Pause Bus Master) bit
                 mov     dx, NABMBAR
                 add     dx, PO_CR_REG
                 mov     al, RPBM
                 out     dx, al
-
-                ;Immediately check if the other buffer is also ready.
-                ;The reference driver (dmasnd32.asm) achieves gapless playback
-                ;via instant IRQ response; our polled approach must compensate
-                ;by queuing the second buffer in the same poll that restarts,
-                ;rather than waiting for the next serve_driver call.
-                xor     ecx, 1                  ;other buffer slot
-                cmp     buff_status[ecx*4], DAC_STOPPED
-                jne     __exit
-
-                mov     buff_status[ecx*4], DAC_PLAYING
-                mov     bdl_slot[1*4], ecx
-                mov     edx, bdl_phys
-                mov     eax, stg_phys[ecx*4]
-                mov     DWORD PTR [edx+8], eax
-                mov     eax, stg_samples[ecx*4]
-                mov     DWORD PTR [edx+12], eax
-
-                mov     dx, NABMBAR
-                add     dx, PO_LVI_REG
-                mov     al, 1
-                out     dx, al
                 jmp     __exit
 
-__all_done:
+__dch_partial:
+                ;DMA halted but we do not have both buffers ready.
+                ;Mark any PLAYING buffer as DONE (it finished playing).
+                cmp     buff_status[0*4], DAC_PLAYING
+                jne     __dch_p1
+                mov     buff_status[0*4], DAC_DONE
+__dch_p1:       cmp     buff_status[1*4], DAC_PLAYING
+                jne     __dch_p_chk
+
+                mov     buff_status[1*4], DAC_DONE
+
+__dch_p_chk:
+                ;If both buffers are now DONE, playback is complete
+                cmp     buff_status[0*4], DAC_DONE
+                jne     __exit
+                cmp     buff_status[1*4], DAC_DONE
+                jne     __exit
+
 IFDEF DEBUG_SERIAL
-                ;Log that both buffers are exhausted -- the application did
-                ;not re-register a buffer before DMA finished, so playback
-                ;is complete (DAC_status transitions to DAC_DONE)
                 push    eax
                 push    esi
                 mov     esi, OFFSET dbg_s_serve_act
@@ -803,68 +844,78 @@ IFDEF DEBUG_SERIAL
                 pop     eax
 ENDIF ; DEBUG_SERIAL
 
-                ;Both buffers exhausted -- no more data to play
                 mov     DAC_status, DAC_DONE
                 jmp     __exit
 
 __dma_running:
-                ;DMA is still running -- check if the other buffer (the one
-                ;not currently being played) has been re-registered by the
-                ;application. If so, advance LVI to include it so the DMA
-                ;engine continues seamlessly without halting between buffers.
+                ;--- Track CIV transitions ---
                 ;
-                ;ADV_LVI is only safe when CIV=0, because we always write the
-                ;new buffer into BDL entry 1. If CIV=1 (entry 1 is playing),
-                ;writing to entry 1 would corrupt the active transfer and lose
-                ;the bdl_slot mapping. In that case, let DMA halt naturally and
-                ;the DCH handler will RESTART with the queued buffer.
-                test    eax, eax                ;EAX = CIV
-                jnz     __exit                  ;CIV != 0, unsafe to ADV_LVI
+                ;In the 32-entry tiled BDL, buffer index = CIV AND 1
+                ;(even entries = buffer 0, odd entries = buffer 1).
+                ;When CIV advances to a different parity, the previous
+                ;buffer's version has been fully consumed by DMA.
+                cmp     eax, last_civ
+                je      __lvi_update            ;no change, just update LVI
 
-                ;Map current CIV (BDL entry 0) through bdl_slot to get the
-                ;buffer slot currently playing, then XOR to get the other slot.
-                mov     ecx, bdl_slot[eax*4]
-                xor     ecx, 1                  ;other buffer slot
-                cmp     buff_status[ecx*4], DAC_STOPPED
-                jne     __exit                  ;not ready, nothing to do
+                mov     ecx, last_civ
+                mov     last_civ, eax
+
+                cmp     ecx, -1                 ;first poll after start/restart?
+                je      __lvi_update            ;yes, just record CIV baseline
+
+                ;CIV advanced -- check if parity changed (different buffer)
+                mov     esi, ecx
+                and     esi, 1                  ;ESI = previous buffer index
+                mov     edi, eax
+                and     edi, 1                  ;EDI = current buffer index
+                cmp     esi, edi
+                je      __lvi_update            ;same buffer, no completion
+
+                ;Parity changed: previous buffer finished playing
+                cmp     buff_status[esi*4], DAC_PLAYING
+                jne     __chk_exhausted
+                mov     buff_status[esi*4], DAC_DONE
+
+__chk_exhausted:
+                ;Check if both buffers are now DONE -- if so, halt DMA
+                cmp     buff_status[0*4], DAC_DONE
+                jne     __lvi_update
+                cmp     buff_status[1*4], DAC_DONE
+                jne     __lvi_update
+
+                ;Both buffers exhausted -- stop DMA, signal completion
+                mov     dx, NABMBAR
+                add     dx, PO_CR_REG
+                mov     al, 0                   ;clear RPBM = stop DMA
+                out     dx, al
 
 IFDEF DEBUG_SERIAL
-                ;Log that we are advancing the Last Valid Index (LVI) to
-                ;include a newly re-registered buffer while DMA is still
-                ;playing the current one (keeps DMA running without a gap)
                 push    eax
                 push    esi
                 mov     esi, OFFSET dbg_s_serve_act
                 call    dbg_str
-                mov     esi, OFFSET dbg_s_adv_lvi
+                mov     esi, OFFSET dbg_s_done
                 call    dbg_str
                 call    dbg_crlf
                 pop     esi
                 pop     eax
 ENDIF ; DEBUG_SERIAL
 
-                ;Advance LVI to include the new buffer. The DMA engine is
-                ;currently playing BDL entry 0 (after a RESTART or start_d_pb),
-                ;so we always copy the new buffer into BDL entry 1 and set LVI=1.
-                ;This guarantees forward CIV progression (0->1->halt) without
-                ;wrapping through uninitialized entries 2-31.
-                mov     buff_status[ecx*4], DAC_PLAYING
+                mov     DAC_status, DAC_DONE
+                jmp     __exit
 
-                mov     eax, buff_sample[ecx*4]
-                call    set_sample_rate_hz
-
-                ;Copy the ready buffer's staging data into BDL entry 1
-                ;and record slot-to-BDL mapping for serve_driver
-                mov     bdl_slot[1*4], ecx
-                mov     edx, bdl_phys
-                mov     eax, stg_phys[ecx*4]
-                mov     DWORD PTR [edx+8], eax
-                mov     eax, stg_samples[ecx*4]
-                mov     DWORD PTR [edx+12], eax
-
+__lvi_update:
+                ;--- Keep ring alive: set LVI one step behind CIV ---
+                ;
+                ;LVI = (CIV - 1) AND 1Fh = (CIV + 31) AND 1Fh
+                ;This ensures CIV != LVI, so the DMA engine never halts
+                ;during normal playback.
+                mov     ecx, eax                ;ECX = CIV
+                add     ecx, 31
+                and     ecx, 1Fh                ;ECX = (CIV + 31) & 0x1F
                 mov     dx, NABMBAR
                 add     dx, PO_LVI_REG
-                mov     al, 1                   ;always BDL entry 1
+                mov     al, cl
                 out     dx, al
 
 __exit:         POP_F
@@ -982,11 +1033,10 @@ __stg_ok:
                 pop     edi
 
                 ;Mark buffer as ready to play. Do NOT write BDL entries here --
-                ;serve_driver's RESTART and ADV_LVI paths copy stg_phys/stg_samples
-                ;into the correct BDL entry when the buffer is actually queued.
-                ;Writing here would risk corrupting an active BDL entry (RESTART
-                ;maps any buffer slot to entry 0, so entry N may be in use by a
-                ;different slot's DMA transfer).
+                ;serve_driver's STOPPED->PLAYING transition tiles stg_phys and
+                ;stg_samples into all 16 same-parity BDL entries on the next poll.
+                ;Writing here would race with the DMA engine, which may be
+                ;currently reading from same-parity entries.
                 mov     buff_status[edi*4], DAC_STOPPED
 
 IFDEF DEBUG_SERIAL
@@ -1041,6 +1091,8 @@ start_d_pb      PROC USES ebx esi edi
 
                 cmp     DAC_status, DAC_PLAYING
                 je      __exit                  ;already playing
+                cmp     DAC_status, DAC_PAUSED
+                je      __exit                  ;paused -- don't interfere
 
                 ;Find first registered buffer (DAC_STOPPED)
                 cmp     buff_status[0*4], DAC_STOPPED
@@ -1052,16 +1104,51 @@ __try1:         cmp     buff_status[1*4], DAC_STOPPED
                 mov     current_buffer, 1
                 jmp     __start
 
-__no_buffers:   mov     DAC_status, DAC_DONE
+__no_buffers:
+IFDEF DEBUG_SERIAL
+                push    eax
+                push    esi
+                mov     esi, OFFSET dbg_s_str_nobu
+                call    dbg_str
+                mov     esi, OFFSET dbg_s_ds
+                call    dbg_str
+                mov     eax, DAC_status
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b0
+                call    dbg_str
+                mov     eax, buff_status[0*4]
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b1
+                call    dbg_str
+                mov     eax, buff_status[1*4]
+                call    dbg_hex8
+                call    dbg_crlf
+                pop     esi
+                pop     eax
+ENDIF ; DEBUG_SERIAL
+                mov     DAC_status, DAC_DONE
                 jmp     __exit
 
 __start:
 IFDEF DEBUG_SERIAL
-                ;Print start_d_pb banner (DMA playback is about to begin)
+                ;Log start_d_pb when it actually proceeds (not on every SKIP)
                 push    eax
                 push    esi
                 mov     esi, OFFSET dbg_s_start
                 call    dbg_str
+                mov     esi, OFFSET dbg_s_ds
+                call    dbg_str
+                mov     eax, DAC_status
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b0
+                call    dbg_str
+                mov     eax, buff_status[0*4]
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b1
+                call    dbg_str
+                mov     eax, buff_status[1*4]
+                call    dbg_hex8
+                call    dbg_crlf
                 pop     esi
                 pop     eax
 ENDIF ; DEBUG_SERIAL
@@ -1072,9 +1159,7 @@ ENDIF ; DEBUG_SERIAL
                 mov     eax, buff_sample[ebx*4]
                 call    set_sample_rate_hz
 
-                ;Reset DMA engine so CIV starts at 0. This ensures the DMA
-                ;engine always plays BDL entries in forward order (0, then 1)
-                ;and never wraps through uninitialized entries 2-31.
+                ;Reset DMA engine so CIV starts at 0.
                 ;RR resets all bus master registers (CIV, LVI, SR, BDBAR)
                 ;except interrupt enable bits, so BDBAR must be re-written.
                 mov     dx, NABMBAR
@@ -1088,38 +1173,59 @@ ENDIF ; DEBUG_SERIAL
                 add     dx, PO_BDBAR_REG
                 out     dx, eax
 
-                ;Copy the first ready buffer into BDL entry 0 and record
-                ;which buffer slot is at each BDL entry (so serve_driver
-                ;can mark the correct slot as DAC_DONE when CIV advances)
+                ;Check if the other buffer is also ready
                 mov     ebx, current_buffer
+                mov     ecx, ebx
+                xor     ecx, 1                  ;other buffer index
+                cmp     buff_status[ecx*4], DAC_STOPPED
+                jne     __single_buf
+
+                ;--- Two buffers ready: tile all 32 BDL entries ---
+                ;Even entries (0,2,...,30) = buffer 0
+                ;Odd entries  (1,3,...,31) = buffer 1
+                mov     buff_status[0*4], DAC_PLAYING
+                mov     buff_status[1*4], DAC_PLAYING
+
+                ;Tile buffer 0 across even entries
+                mov     edx, bdl_phys
+                mov     eax, stg_phys[0*4]
+                mov     esi, stg_samples[0*4]
+                mov     ecx, 16
+__sp_tile_b0:   mov     DWORD PTR [edx], eax
+                mov     DWORD PTR [edx+4], esi
+                add     edx, 16                 ;skip 2 entries (16 bytes)
+                dec     ecx
+                jnz     __sp_tile_b0
+
+                ;Tile buffer 1 across odd entries
+                mov     edx, bdl_phys
+                add     edx, 8                  ;start at entry 1 (offset 8)
+                mov     eax, stg_phys[1*4]
+                mov     esi, stg_samples[1*4]
+                mov     ecx, 16
+__sp_tile_b1:   mov     DWORD PTR [edx], eax
+                mov     DWORD PTR [edx+4], esi
+                add     edx, 16                 ;skip 2 entries (16 bytes)
+                dec     ecx
+                jnz     __sp_tile_b1
+
+                ;LVI=31: full 32-entry ring, CIV=0 after RR so CIV != LVI
+                mov     al, 31
+                jmp     __write_lvi
+
+__single_buf:
+                ;--- Only one buffer: populate entry 0, set LVI=0 ---
+                ;DMA will play entry 0 and halt (CIV==LVI). serve_driver
+                ;will detect DCH and transition to ring mode when the
+                ;second buffer arrives.
                 mov     buff_status[ebx*4], DAC_PLAYING
-                mov     bdl_slot[0*4], ebx
+
                 mov     edx, bdl_phys
                 mov     eax, stg_phys[ebx*4]
                 mov     DWORD PTR [edx], eax
                 mov     eax, stg_samples[ebx*4]
                 mov     DWORD PTR [edx+4], eax
 
-                ;Check if the other buffer is also ready
-                mov     ecx, ebx
-                xor     ecx, 1                  ;other buffer index
-                cmp     buff_status[ecx*4], DAC_STOPPED
-                jne     __lvi_zero
-
-                ;Both buffers ready -- copy the other into BDL entry 1
-                mov     buff_status[ecx*4], DAC_PLAYING
-                mov     bdl_slot[1*4], ecx
-                mov     edx, bdl_phys
-                mov     eax, stg_phys[ecx*4]
-                mov     DWORD PTR [edx+8], eax
-                mov     eax, stg_samples[ecx*4]
-                mov     DWORD PTR [edx+12], eax
-
-                ;LVI=1: play entry 0, then entry 1, then halt
-                mov     al, 1
-                jmp     __write_lvi
-
-__lvi_zero:     ;Only one buffer -- LVI=0: play entry 0, then halt
                 mov     al, 0
 
 __write_lvi:    mov     dx, NABMBAR
@@ -1170,11 +1276,44 @@ pause_d_pb      PROC USES ebx esi edi
                 cmp     DAC_status, DAC_PLAYING
                 jne     __exit
 
-                ;Clear RPBM to pause DMA (position is preserved)
+                ;Clear RPBM (Run/Pause Bus Master) to pause DMA. The engine
+                ;finishes the current DMA transfer (up to 4096 DWORDs) before
+                ;halting, but preserves its position within the current BDL
+                ;entry for seamless resume. With 32 tiled entries, CIV is
+                ;never at LVI during normal playback, so resume is always
+                ;safe via a simple RPBM toggle.
                 mov     dx, NABMBAR
                 add     dx, PO_CR_REG
                 mov     al, 0
                 out     dx, al
+
+IFDEF DEBUG_SERIAL
+                push    esi
+                mov     esi, OFFSET dbg_s_pause
+                call    dbg_str
+                mov     dx, NABMBAR
+                add     dx, PO_CIV_REG
+                in      al, dx
+                movzx   eax, al
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_lvi
+                call    dbg_str
+                mov     dx, NABMBAR
+                add     dx, PO_LVI_REG
+                in      al, dx
+                movzx   eax, al
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b0
+                call    dbg_str
+                mov     eax, buff_status[0*4]
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b1
+                call    dbg_str
+                mov     eax, buff_status[1*4]
+                call    dbg_hex8
+                call    dbg_crlf
+                pop     esi
+ENDIF ; DEBUG_SERIAL
 
                 mov     DAC_status, DAC_PAUSED
 
@@ -1191,7 +1330,57 @@ cont_d_pb       PROC USES ebx esi edi
                 cmp     DAC_status, DAC_PAUSED
                 jne     __exit
 
-                ;Set RPBM to resume DMA from where it paused
+                ;Read CIV (Current Index Value) -- which BDL entry the DMA
+                ;engine is at after the pause wind-down completed.
+                mov     dx, NABMBAR
+                add     dx, PO_CIV_REG
+                in      al, dx
+                movzx   eax, al                 ;EAX = current CIV
+
+                ;Set LVI one step behind CIV so CIV != LVI at resume.
+                ;This guarantees the DMA engine will not halt immediately
+                ;when RPBM is set. LVI = (CIV + 31) AND 1Fh = (CIV - 1) mod 32.
+                mov     ecx, eax
+                add     ecx, 31
+                and     ecx, 1Fh
+                mov     dx, NABMBAR
+                add     dx, PO_LVI_REG
+                push    eax                     ;save CIV for last_civ update
+                mov     al, cl
+                out     dx, al
+                pop     eax
+
+                ;Update last_civ baseline for serve_driver so it does not
+                ;see a stale CIV-to-last_civ transition on the first poll
+                mov     last_civ, eax
+
+IFDEF DEBUG_SERIAL
+                push    esi
+                mov     esi, OFFSET dbg_s_resume
+                call    dbg_str
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_lvi
+                call    dbg_str
+                push    eax
+                movzx   eax, cl                 ;LVI value we just wrote
+                call    dbg_hex8
+                pop     eax
+                mov     esi, OFFSET dbg_s_b0
+                call    dbg_str
+                push    eax
+                mov     eax, buff_status[0*4]
+                call    dbg_hex8
+                mov     esi, OFFSET dbg_s_b1
+                call    dbg_str
+                mov     eax, buff_status[1*4]
+                call    dbg_hex8
+                pop     eax
+                call    dbg_crlf
+                pop     esi
+ENDIF ; DEBUG_SERIAL
+
+                ;Resume DMA from exact pause position by setting RPBM
+                ;(Run/Pause Bus Master). Safe because LVI != CIV.
                 mov     dx, NABMBAR
                 add     dx, PO_CR_REG
                 mov     al, RPBM
