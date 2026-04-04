@@ -128,7 +128,8 @@ driver_index    LABEL DWORD
                 dd AIL_D_PB_PAN,OFFSET get_d_pb_pan
                 dd AIL_F_SND_BUFF,OFFSET format_sb
                 dd AIL_F_VOC_FILE,OFFSET format_VOC_file
-                ; TODO: implement AIL_P_VOC_FILE, AIL_INDEX_VOC_BLK
+                dd AIL_P_VOC_FILE,OFFSET play_VOC_file
+                dd AIL_INDEX_VOC_BLK,OFFSET index_VOC_blk
                 dd -1
 
                 ;
@@ -269,6 +270,14 @@ dbg_s_stgsize   db 'stg_size: ',0
 dbg_s_buflen    db 'buf_len: ',0
 dbg_s_pack      db 'pack: ',0
 dbg_s_start     db '--- start_d_pb',0
+dbg_s_voc_mode  db 'VOC_MODE',13,10,0
+dbg_s_voc_no_init db 'VOC: WARNING: play_VOC_file not called!',13,10,0
+dbg_s_serve_comp db 'SERVE: comp buf:',0
+dbg_s_serve_stat db ' stat:',0
+dbg_s_voc_refill db 'VOC: refill buf:',0
+dbg_s_voc_civ db ' CIV:',0
+dbg_s_voc_lvi db ' LVI:',0
+dbg_s_voc_stat db ' stats:',0
 dbg_s_pause     db '--- pause CIV:',0
 dbg_s_resume    db '--- resume CIV:',0
 dbg_s_serve_sr  db 'SR:',0
@@ -285,6 +294,7 @@ dbg_s_lvi       db ' LVI:',0
 ENDIF ; DEBUG_SERIAL
 
                 INCLUDE util/to16s.asm
+                INCLUDE util/voc.asm
 
 ;----------------------------------------------------------------------------
 ; set_sample_rate_hz -- Convert SB time constant to Hz and program codec
@@ -612,6 +622,8 @@ shutdown_driver PROC USES ebx esi edi,\
 __bdl_freed:
 
                 mov     DAC_status, DAC_STOPPED
+                mov     buffer_mode, BUF_MODE  ;ensure we're not in VOC mode
+                call    voc_shutdown       ;reset VOC module state (required by API contract)
 
                 POP_F
                 ret
@@ -879,12 +891,97 @@ __dma_running:
                 mov     edi, eax
                 and     edi, 1                  ;EDI = current buffer index
                 cmp     esi, edi
-                je      __lvi_update            ;same buffer, no completion
+                je      __lvi_update            ;same parity, no buffer transition
+
+IFDEF DEBUG_SERIAL
+                ; Debug: buffer completion detected
+                mov     edx, esi                ; Save buffer index in EDX for debug
+                push eax
+                push esi
+                mov esi, OFFSET dbg_s_serve_comp
+                call dbg_str
+                movzx eax, dl                  ; Buffer index from EDX
+                call dbg_hex8
+                mov esi, OFFSET dbg_s_serve_stat
+                call dbg_str
+                movzx eax, WORD PTR buff_status[edx*4]  ; Use EDX for buffer index
+                call dbg_hex8
+                call dbg_crlf
+                pop esi
+                pop eax
+ENDIF ; DEBUG_SERIAL
 
                 ;Parity changed: previous buffer finished playing
                 cmp     buff_status[esi*4], DAC_PLAYING
                 jne     __chk_exhausted
                 mov     buff_status[esi*4], DAC_DONE
+
+                ;Fall through to VOC refill check (or __chk_exhausted for BUF_MODE)
+__voc_buffer_refill:
+
+                ;In VOC_MODE, auto-refill the completed buffer from the
+                ;VOC block chain. This reuses the existing register_sb ->
+                ;STOPPED -> tile -> PLAYING pipeline with one poll cycle
+                ;delay (~10ms), well within the ~200ms of buffered data
+                ;in the tiled BDL ring.
+                cmp     buffer_mode, VOC_MODE
+                jne     __chk_exhausted
+
+                push    esi
+                call    voc_fetch_block
+                pop     esi
+                jc      __chk_exhausted         ;no more blocks, let drain
+
+                ;Debug: show state before VOC refill
+IFDEF DEBUG_SERIAL
+                push eax
+                push edx
+                push esi                ; Save ESI (buffer index)
+                mov esi, OFFSET dbg_s_voc_refill
+                call dbg_str
+                movzx eax, byte ptr [esp]  ; Buffer index from saved ESI
+                call dbg_hex8
+                mov esi, OFFSET dbg_s_voc_civ
+                call dbg_str
+                mov dx, NABMBAR
+                add dx, PO_CIV_REG
+                in al, dx
+                movzx eax, al
+                call dbg_hex8
+                mov esi, OFFSET dbg_s_voc_lvi
+                call dbg_str
+                mov dx, NABMBAR
+                add dx, PO_LVI_REG
+                in al, dx
+                movzx eax, al
+                call dbg_hex8
+                mov esi, OFFSET dbg_s_voc_stat
+                call dbg_str
+                movzx eax, WORD PTR buff_status[0*4]
+                call dbg_hex8
+                mov al, ','
+                call dbg_char
+                movzx eax, WORD PTR buff_status[1*4]
+                call dbg_hex8
+                call dbg_crlf
+                pop esi                 ; Restore ESI
+                pop edx
+                pop eax
+ENDIF ; DEBUG_SERIAL
+
+                ;Temporarily switch to BUF_MODE to avoid VOC cancellation
+                ;in register_sb (same approach as start_d_pb)
+                mov     buffer_mode, BUF_MODE
+                
+                push    OFFSET voc_sbuf
+                push    esi
+                push    0
+                call    register_sb
+                add     esp, 12
+                
+                ;Restore VOC mode
+                mov     buffer_mode, VOC_MODE
+                jmp     __lvi_update            ;skip exhaustion check
 
 __chk_exhausted:
                 ;Check if both buffers are now DONE -- if so, halt DMA
@@ -939,7 +1036,15 @@ register_sb     PROC USES ebx esi edi,\
                 pushfd
                 cli
 
-                mov     edi, [BufNum]           ;buffer index 0 or 1
+                ;If in VOC mode, an explicit buffer registration cancels it
+                ;(matches dmasnd32.asm:2838-2841)
+                cmp     buffer_mode, VOC_MODE
+                jne     __get_fields
+                call    stop_d_pb
+                mov     buffer_mode, BUF_MODE
+                call    voc_shutdown       ;reset VOC module state (required by API contract)
+
+__get_fields:   mov     edi, [BufNum]           ;buffer index 0 or 1
                 and     edi, 1
 
                 ASSUME esi:PTR sbuffer
@@ -1104,6 +1209,62 @@ start_d_pb      PROC USES ebx esi edi
                 cmp     DAC_status, DAC_PAUSED
                 je      __exit                  ;paused -- don't interfere
 
+                ;--- VOC mode: prime buffers from VOC block chain ---
+                cmp     buffer_mode, VOC_MODE
+                jne     __buf_start
+
+                cmp     DAC_status, DAC_STOPPED
+                jne     __exit
+
+IFDEF DEBUG_SERIAL
+                ; Debug: VOC playback starting
+                mov esi, OFFSET dbg_s_start
+                call dbg_str
+                mov esi, OFFSET dbg_s_voc_mode
+                call dbg_str
+                call dbg_crlf
+                
+                ; Check if VOC state is initialized (voc_blk_off should be non-zero after play_VOC_file)
+                cmp     voc_blk_off, 0
+                jne     __voc_state_ok
+                mov esi, OFFSET dbg_s_voc_no_init
+                call dbg_str
+                call dbg_crlf
+__voc_state_ok:
+ENDIF ; DEBUG_SERIAL
+
+                ;Temporarily switch to BUF_MODE so that register_sb does
+                ;not cancel VOC playback (its VOC->BUF guard is for
+                ;external app calls, not our internal pipeline)
+                mov     buffer_mode, BUF_MODE
+
+                ;Prime buffer 0 from the next voice block in the chain
+                call    voc_fetch_block
+                jc      __voc_empty
+                push    OFFSET voc_sbuf
+                push    0
+                push    0
+                call    register_sb
+                add     esp, 12
+
+                ;Prime buffer 1 if another voice block exists
+                call    voc_fetch_block
+                jc      __voc_one               ;one buffer is enough
+                push    OFFSET voc_sbuf
+                push    1
+                push    0
+                call    register_sb
+                add     esp, 12
+
+__voc_one:      mov     buffer_mode, VOC_MODE   ;restore VOC mode
+                jmp     __buf_start             ;fall through to existing start logic
+
+__voc_empty:    mov     buffer_mode, VOC_MODE   ;restore VOC mode
+                mov     DAC_status, DAC_DONE
+                jmp     __exit
+
+                ;--- Buffer mode: find first registered buffer ---
+__buf_start:
                 ;Find first registered buffer (DAC_STOPPED)
                 cmp     buff_status[0*4], DAC_STOPPED
                 jne     __try1
