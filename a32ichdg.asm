@@ -295,6 +295,7 @@ ENDIF ; DEBUG_SERIAL
 
                 INCLUDE util/to16s.asm
                 INCLUDE util/voc.asm
+                INCLUDE util/pan.asm
 
 ;----------------------------------------------------------------------------
 ; set_sample_rate_hz -- Convert SB time constant to Hz and program codec
@@ -1577,49 +1578,62 @@ get_VOC_status  ENDP
 
 ;****************************************************************************
 ;
-; apply_volume -- Write AIL volume to AC'97 PCM Out Volume register
+; apply_volume -- Write panned volume to AC'97 PCM Out Volume register
 ;
-; Converts main_volume (AIL range 0-127) to AC'97 6-bit attenuation
-; and writes CODEC_PCM_OUT_REG (18h). Both channels get the same
-; attenuation (no panning). When set_d_pb_pan is implemented, this
-; procedure will compute separate L/R values from main_volume and
-; panpot_val.
+; Computes separate left and right attenuation from main_volume and
+; panpot_val via calc_pan_volumes (util/pan.asm), then writes the
+; PCM Out Volume register (CODEC_PCM_OUT_REG, 18h).
 ;
 ; Register format: bits 13:8 = left attenuation, bits 5:0 = right
-; attenuation. Each step is ~1.5 dB. 0 = max volume, 63 = min.
-; BIT15 = mute.
+; attenuation. Each step is ~1.5 dB. 0 = max volume, 31 = max
+; attenuation we use. BIT15 = mute.
 ;
-; Entry: None (reads main_volume global)
+; Attenuation is 5-bit safe (0-31): all AC'97 codecs support at least
+; 5-bit attenuation per channel; 6-bit codecs exist but are not
+; universal, and writing bit 5 on a 5-bit codec causes the value to
+; wrap around.
+;
+; Entry: None (reads main_volume and panpot_val globals)
 ; Exit:  All registers preserved except flags.
 ;
 apply_volume    PROC NEAR
                 push    eax
                 push    ecx
                 push    edx
+                push    esi
+                push    edi
 
                 mov     eax, main_volume
                 test    eax, eax
                 jz      __av_mute
 
-                ; attenuation = (127 - volume) >> 2, giving 0-31 range
-                ; (5-bit safe: all AC'97 codecs support at least 5-bit
-                ; attenuation per channel; 6-bit codecs exist but are
-                ; not universal, and writing bit 5 on a 5-bit codec
-                ; causes the value to wrap around)
-                mov     ecx, 127
+                call    calc_pan_volumes        ;ESI=left 0-16129, EDI=right 0-16129
+
+                ; Left attenuation: 31 - (left_vol >> 9)
+                ; vol >> 9 maps 0-16129 to 0-31; invert for attenuation
+                mov     eax, esi
+                shr     eax, 9
+                mov     ecx, 31
                 sub     ecx, eax
-                shr     ecx, 2                  ;ECX = attenuation 0-31
+                shl     ecx, 8                  ;left atten in bits 13:8
+
+                ; Right attenuation: 31 - (right_vol >> 9)
+                mov     eax, edi
+                shr     eax, 9
+                mov     edx, 31
+                sub     edx, eax
+                or      ecx, edx                ;(left_atten << 8) | right_atten
                 mov     eax, ecx
-                shl     eax, 8
-                or      eax, ecx                ;AX = (atten << 8) | atten
                 jmp     __av_write
 
 __av_mute:      mov     eax, 8000h              ;BIT15 = mute
 
 __av_write:     mov     dx, NAMBAR
-                add     dx, CODEC_PCM_OUT_REG
+                add     dx, CODEC_PCM_OUT_REG   ;PCM Out Volume register (18h)
                 out     dx, ax
 
+                pop     edi
+                pop     esi
                 pop     edx
                 pop     ecx
                 pop     eax
@@ -1664,9 +1678,7 @@ set_d_pb_pan    PROC USES ebx esi edi,\
                 mov     eax, [Pan]
                 mov     panpot_val, eax
 
-                ; TODO: when panning is implemented, call apply_volume here
-                ; (apply_volume will compute separate L/R attenuation from
-                ; main_volume and panpot_val)
+                call    apply_volume
 
                 POP_F
                 ret

@@ -78,6 +78,7 @@ Adapted from [ich2player](https://github.com/volkertb/ich2player). Originally 16
 | `dpmi.asm` | DMA-safe memory allocation. Encapsulates physaddr translation (identity probe / ring 0 page walk / VDS / conventional memory fallback). API: `dpmi_alloc_staging` (returns phys addr), `dpmi_free_staging`, `dpmi_shutdown`. |
 | `physaddr.asm` | Linear-to-physical translation (included by dpmi.asm internally). |
 | `to16s.asm` | `convert_to_16stereo`: up-converts PCM to 16-bit signed stereo. |
+| `pan.asm` | `calc_pan_volumes`: computes panned L/R volumes from `main_volume` and `panpot_val` via `pan_graph` lookup table. |
 | `voc.asm` | VOC block parser: `play_VOC_file`, `index_VOC_blk`, `voc_fetch_block`, `voc_shutdown`. Hardware-agnostic. |
 
 ## Physical vs Linear Addressing
@@ -102,7 +103,6 @@ Untested: DOS/32A (expected: ring 0 page walk), QEMM, Windows 9x DOS box, real h
 
 ## TODO
 
-- AC'97 pan control via `apply_volume` (split L/R attenuation from `panpot_val`)
 - Software ADPCM decoder (nice-to-have)
 - Debug serial throttling in `serve_driver` (polled serial at 100 Hz exceeds timer budget under JEMM V86 overhead)
 - physaddr testing: DOS/32A, QEMM, Windows 9x, real hardware
